@@ -8,12 +8,37 @@
 #
 # Commits and tags locally. It never pushes; it prints the command for that.
 
-set -euo pipefail
+set -Eeuo pipefail
 
 cd "$(dirname "$0")/.."
 
 SCRIPT=wslps
 die() { printf 'bump: %s\n' "$*" >&2; exit 1; }
+
+# Everything from the sed rewrite onwards is undone if any step fails. Without
+# this a failed commit (no git identity, a pre-commit hook, an unusable signing
+# key) leaves VERSION rewritten and staged, and the dirty-tree check above then
+# refuses the retry, so the repo has to be unpicked by hand.
+orig_head=""
+stage=none
+
+restore() {
+  case "$stage" in
+    committed)
+      if [ -n "$orig_head" ]; then
+        git reset -q --hard "$orig_head" || true
+        printf 'bump: rolled back the release commit\n' >&2
+      fi
+      ;;
+    modified)
+      git reset -q -- "$SCRIPT" || true
+      git checkout -q -- "$SCRIPT" || true
+      printf 'bump: restored %s, nothing was committed\n' "$SCRIPT" >&2
+      ;;
+  esac
+  stage=none
+}
+trap restore ERR INT TERM
 
 [ -f "$SCRIPT" ] || die "run me from the repo (no ./$SCRIPT here)"
 [ $# -eq 1 ] || die "usage: scripts/bump <major|minor|patch|X.Y.Z>"
@@ -51,18 +76,30 @@ if git rev-parse -q --verify "refs/tags/v$new" > /dev/null; then
   die "tag v$new already exists"
 fi
 
+git config user.name > /dev/null \
+  || die "git user.name is not set - git config user.name 'Your Name'"
+git config user.email > /dev/null \
+  || die "git user.email is not set - git config user.email you@example.com"
+
+orig_head=$(git rev-parse --verify -q HEAD || true)
+
 printf 'bumping %s -> %s\n' "$current" "$new"
 
+stage=modified
 sed -i "s/^VERSION=$current$/VERSION=$new/" "$SCRIPT"
 
-check=$(sed -n 's/^VERSION=\([0-9][0-9.]*\)$/\1/p' "$SCRIPT" | head -1)
+check=$(sed -n 's/^VERSION=\(.*\)$/\1/p' "$SCRIPT" | head -1)
 [ "$check" = "$new" ] || die "rewrite failed, $SCRIPT still reports $check"
 
 bash -n "$SCRIPT" || die "$SCRIPT no longer parses, aborting"
 
 git add "$SCRIPT"
 git commit -q -m "chore(release): v$new"
+stage=committed
 git tag -a "v$new" -m "v$new"
+
+stage=none
+trap - ERR INT TERM
 
 printf '\ncommitted and tagged v%s\n' "$new"
 printf 'push it with:\n\n  git push origin %s && git push origin v%s\n\n' \

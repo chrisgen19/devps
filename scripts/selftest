@@ -61,6 +61,48 @@ for v in 1.2 1.2.3.4 1.2.3.4.5 sideways 1..3 01.2.3 1.02.3 2.0.08 ""; do
 done
 rejects "bump with no argument" "$BUMP"
 
+group "a failed commit leaves no half-finished bump"
+# Build a throwaway repo from the working tree, so this tests the files as they
+# are now rather than whatever happens to be committed.
+tmp=$(mktemp -d)
+mkdir -p "$tmp/repo"
+cp -r ./wslps ./scripts "$tmp/repo/"
+if ( cd "$tmp/repo" \
+      && git init -q \
+      && git add -A \
+      && git -c user.name=selftest -c user.email=selftest@localhost \
+             commit -q -m init ) 2> "$tmp/init.err"; then
+
+  # Any commit failure will do. A rejecting pre-commit hook stands in for a
+  # missing git identity or an unusable signing key.
+  printf '#!/bin/sh\nexit 1\n' > "$tmp/repo/.git/hooks/pre-commit"
+  chmod +x "$tmp/repo/.git/hooks/pre-commit"
+  before=$(sed -n 's/^VERSION=\(.*\)$/\1/p' "$tmp/repo/wslps" | head -1)
+
+  if ( cd "$tmp/repo" && ./scripts/bump patch ) > /dev/null 2> "$tmp/bump.err"; then
+    fail "bump should have failed when the commit was rejected"
+  else
+    pass "bump failed as expected"
+  fi
+
+  after=$(sed -n 's/^VERSION=\(.*\)$/\1/p' "$tmp/repo/wslps" | head -1)
+  if [ "$before" = "$after" ]; then
+    pass "VERSION was restored ($after)"
+  else
+    fail "VERSION left rewritten: $before -> $after"
+  fi
+
+  dirty=$( cd "$tmp/repo" && git status --porcelain )
+  if [ -z "$dirty" ]; then
+    pass "working tree left clean, a retry is not blocked"
+  else
+    fail "working tree left dirty: $dirty"
+  fi
+else
+  fail "could not build the throwaway repo: $(cat "$tmp/init.err")"
+fi
+rm -rf "$tmp"
+
 # ---------------------------------------------------------------------------
 # The kill guards. If any of these regress the tool can take down the machine
 # it runs on, so they are the reason this script is gated on before release.
