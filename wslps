@@ -1,0 +1,532 @@
+#!/usr/bin/env bash
+# wslps - see what is running in this WSL instance, what it costs, and stop it safely.
+# Dependencies: bash, procps, iproute2, awk. Nothing else.
+
+set -uo pipefail
+VERSION=2.0.0
+
+# ---------------------------------------------------------------- colour ----
+if [ -t 1 ] && [ "${NO_COLOR:-}" = "" ]; then
+  C_DIM=$'\033[2m'; C_B=$'\033[1m'; C_R=$'\033[31m'; C_Y=$'\033[33m'
+  C_G=$'\033[32m'; C_C=$'\033[36m'; C_0=$'\033[0m'
+else
+  C_DIM=""; C_B=""; C_R=""; C_Y=""; C_G=""; C_C=""; C_0=""
+fi
+nocolour() { C_DIM=""; C_B=""; C_R=""; C_Y=""; C_G=""; C_C=""; C_0=""; }
+
+die() { printf '%swslps: %s%s\n' "$C_R" "$*" "$C_0" >&2; exit 2; }
+
+# ------------------------------------------------------------- awk shared ----
+AWKLIB='
+function hum(kb,   v, u, i) {
+  v = kb + 0; split("K M G T", u, " "); i = 1
+  while (v >= 1024 && i < 4) { v /= 1024; i++ }
+  if (v >= 100 || i == 1) return sprintf("%d%s", v + 0.5, u[i])
+  return sprintf("%.1f%s", v, u[i])
+}
+function dur(s,   d, h, m) {
+  d = int(s / 86400); s %= 86400
+  h = int(s / 3600);  s %= 3600
+  m = int(s / 60)
+  if (d) return sprintf("%dd%dh", d, h)
+  if (h) return sprintf("%dh%02dm", h, m)
+  return sprintf("%dm", m)
+}
+function shorten(a, w,   s) {
+  s = a
+  sub(/^\/[^ ]*\//, "", s)
+  gsub(/\/home\/[^\/]+\//, "~/", s)
+  if (w > 3 && length(s) > w) s = substr(s, 1, w - 3) "..."
+  return s
+}
+'
+
+WS_GROUPS="mcp ai-agent dev-server browser editor database webserver node other"
+
+# ---------------------------------------------------------------- helpers ----
+meminfo() { awk -v k="$1" '$1 == k":" { print $2; exit }' /proc/meminfo; }
+
+bar() {
+  awk -v u="$1" -v t="$2" -v w="${3:-24}" 'BEGIN{
+    p = (t > 0) ? u / t : 0
+    f = int(p * w + 0.5); if (f > w) f = w
+    s = ""
+    for (i = 0; i < w; i++) s = s (i < f ? "#" : ".")
+    printf "%s %3d%%", s, p * 100 + 0.5
+  }'
+}
+
+hum_kb() { awk "$AWKLIB"' BEGIN { print hum(ARGV[1]) }' "$1"; }
+
+# snapshot -> TSV: pid  rss_kb  swap_kb  etimes  pcpu  group  args   (rss desc)
+snapshot() {
+  ps -eo pid=,rss=,etimes=,pcpu=,args= --sort=-rss | awk '
+  function swapkb(pid,   f, line, p, v) {
+    f = "/proc/" pid "/status"; v = 0
+    while ((getline line < f) > 0)
+      if (line ~ /^VmSwap:/) { split(line, p, /[ \t]+/); v = p[2] + 0; break }
+    close(f)
+    return v
+  }
+  function cat(a,   l) {
+    l = tolower(a)
+    if (l ~ /mcp/)                                                    return "mcp"
+    if (l ~ /(^|\/)claude([ \t]|$)|claude-code|(^|\/)codex([ \t]|$)|cursor-agent/) return "ai-agent"
+    if (l ~ /next-server|next dev|\.next\/|vite|nuxt|astro|webpack|remix|(^|\/)turbo([ \t]|$)/) return "dev-server"
+    if (l ~ /\/chrome|chromium|firefox|msedge|playwright|puppeteer/)   return "browser"
+    if (l ~ /\.vscode-server|\.cursor-server/)                         return "editor"
+    if (l ~ /mysqld|postgres|redis-server|mariadb|mongod/)             return "database"
+    if (l ~ /apache2|nginx|php-fpm|httpd/)                             return "webserver"
+    if (l ~ /(^|\/)node([ \t]|$)|(^|\/)npm |(^|\/)pnpm |yarn|(^|\/)bun([ \t]|$)/) return "node"
+    return "other"
+  }
+  {
+    pid = $1; rss = $2 + 0; et = $3 + 0; pc = $4 + 0
+    args = ""
+    for (i = 5; i <= NF; i++) args = args (i > 5 ? " " : "") $i
+    if (args ~ /^\[/) next
+    printf "%s\t%d\t%d\t%d\t%s\t%s\t%s\n", pid, rss, swapkb(pid), et, pc, cat(args), args
+  }'
+}
+
+SNAP=""
+snap() { if [ -n "$SNAP" ]; then printf '%s\n' "$SNAP"; else snapshot; fi; }
+
+valid_group() { case " $WS_GROUPS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# ----------------------------------------------------------------- header ----
+header() {
+  local mt ma st sf su l1 l5 l15 cores dstate warned=0
+  mt=$(meminfo MemTotal);  ma=$(meminfo MemAvailable)
+  st=$(meminfo SwapTotal); sf=$(meminfo SwapFree); su=$(( st - sf ))
+  read -r l1 l5 l15 _ < /proc/loadavg
+  cores=$(nproc)
+  dstate=$(ps -eo stat= | grep -c '^D' || true)
+
+  printf '%s%s WSL RESOURCES %s %s%s  up %s%s\n\n' "$C_B" "$C_C" "$C_0" \
+    "$C_DIM" "$(date '+%a %d %b %H:%M')" "$(uptime -p | sed 's/^up //')" "$C_0"
+  printf '  %-6s %s   %s used of %s  %s(%s available)%s\n' "RAM" \
+    "$(bar $(( mt - ma )) "$mt")" "$(hum_kb $(( mt - ma )))" "$(hum_kb "$mt")" \
+    "$C_DIM" "$(hum_kb "$ma")" "$C_0"
+  if [ "$st" -gt 0 ]; then
+    printf '  %-6s %s   %s used of %s  %s(%s free)%s\n' "SWAP" \
+      "$(bar "$su" "$st")" "$(hum_kb "$su")" "$(hum_kb "$st")" "$C_DIM" \
+      "$(hum_kb "$sf")" "$C_0"
+  fi
+  printf '  %-6s %s   %s / %s / %s  %sacross %s cores%s\n' "LOAD" \
+    "$(bar "$l1" "$cores")" "$l1" "$l5" "$l15" "$C_DIM" "$cores" "$C_0"
+
+  echo
+  if [ "$st" -gt 0 ] && [ $(( su * 100 / st )) -ge 80 ]; then
+    printf '  %s! swap is %d%% full - the box is paging heavily%s\n' "$C_R" \
+      $(( su * 100 / st )) "$C_0"; warned=1
+  fi
+  if [ $(( ma * 100 / mt )) -le 15 ]; then
+    printf '  %s! only %s available RAM (%d%%) - close something%s\n' "$C_R" \
+      "$(hum_kb "$ma")" $(( ma * 100 / mt )) "$C_0"; warned=1
+  fi
+  if awk -v l="$l1" -v c="$cores" 'BEGIN{exit !(l > c * 1.5)}'; then
+    printf '  %s! load %s on %s cores - CPU saturated%s\n' "$C_Y" "$l1" "$cores" "$C_0"
+    warned=1
+  fi
+  if [ "$dstate" -gt 0 ]; then
+    printf '  %s! %d process(es) in D state (blocked on disk / page-in)%s\n' "$C_Y" \
+      "$dstate" "$C_0"; warned=1
+  fi
+  if [ "$warned" = 1 ]; then
+    printf '  %stry: wslps idle    then: wslps kill port <n>%s\n' "$C_DIM" "$C_0"
+  else
+    printf '  %sall clear%s\n' "$C_G" "$C_0"
+  fi
+  echo
+}
+
+# ----------------------------------------------------------------- tables ----
+group_table() {
+  snap | awk -F'\t' -v ORDER="$WS_GROUPS" -v CB="$C_B" -v CD="$C_DIM" -v C0="$C_0" \
+  "$AWKLIB"'
+  { n[$6]++; r[$6] += $2; s[$6] += $3; tn++; tr += $2; ts += $3 }
+  END {
+    ng = split(ORDER, o, " ")
+    printf "%sGROUPS%s\n", CB, C0
+    printf "  %-12s %6s %9s %9s\n", "GROUP", "COUNT", "RAM", "SWAP"
+    for (i = 1; i <= ng; i++) {
+      best = -1; bi = 0
+      for (j = 1; j <= ng; j++) {
+        g = o[j]
+        if (done[g] || !(g in n)) continue
+        if (r[g] > best) { best = r[g]; bi = j }
+      }
+      if (!bi) break
+      g = o[bi]; done[g] = 1
+      w = (tr > 0) ? int(r[g] * 100 / tr / 4 + 0.5) : 0
+      b = ""; for (k = 0; k < w; k++) b = b "#"
+      printf "  %-12s %6d %9s %9s   %s%s%s\n", g, n[g], hum(r[g]),
+             (s[g] > 0 ? hum(s[g]) : "-"), CD, b, C0
+    }
+    printf "  %s%-12s %6d %9s %9s%s\n\n", CD, "TOTAL", tn, hum(tr),
+           (ts > 0 ? hum(ts) : "-"), C0
+  }'
+}
+
+# proc_table <title> <limit> <rss|swap> <groupfilter> <showgroupcol>
+proc_table() {
+  local title="$1" limit="$2" sortf="$3" gf="$4" showg="$5" input
+  input=$(snap)
+  [ "$sortf" = swap ] && input=$(printf '%s\n' "$input" | sort -t$'\t' -k3,3nr)
+  [ -n "$gf" ] && input=$(printf '%s\n' "$input" | awk -F'\t' -v g="$gf" '$6 == g')
+  if [ -z "$input" ]; then
+    printf '%s%s%s\n  %s(none)%s\n\n' "$C_B" "$title" "$C_0" "$C_DIM" "$C_0"
+    return
+  fi
+  printf '%s%s%s\n' "$C_B" "$title" "$C_0"
+  printf '%s\n' "$input" | head -n "$limit" | awk -F'\t' -v SHOWG="$showg" "$AWKLIB"'
+  BEGIN {
+    if (SHOWG) printf "  %7s %8s %8s  %-11s %8s  %s\n", "PID","RAM","SWAP","GROUP","UPTIME","COMMAND"
+    else       printf "  %7s %8s %8s %8s  %s\n",        "PID","RAM","SWAP","UPTIME","COMMAND"
+  }
+  {
+    sw = ($3 > 0 ? hum($3) : "-")
+    if (SHOWG) printf "  %7s %8s %8s  %-11s %8s  %s\n", $1, hum($2), sw, $6, dur($4), shorten($7, 58)
+    else       printf "  %7s %8s %8s %8s  %s\n",        $1, hum($2), sw, dur($4), shorten($7, 66)
+  }'
+  echo
+}
+
+ports_table() {
+  local rows port pid rss args ramcol
+  rows=$(ss -tlnpH | awk '
+    { n = split($4, a, ":"); p = a[n]
+      pid = ""
+      if (match($0, /pid=[0-9]+/)) pid = substr($0, RSTART + 4, RLENGTH - 4)
+      k = p "/" pid; if (k in seen) next; seen[k] = 1
+      printf "%s\t%s\n", p, pid }' | sort -n -u)
+  printf '%sLISTENING PORTS%s\n' "$C_B" "$C_0"
+  if [ -z "$rows" ]; then printf '  %s(nothing listening)%s\n\n' "$C_DIM" "$C_0"; return; fi
+  printf '  %7s %8s %8s  %s\n' "PORT" "PID" "RAM" "PROCESS"
+  while IFS=$'\t' read -r port pid; do
+    rss=""; args=""
+    if [ -z "$pid" ]; then
+      args="${C_DIM}(another user - run: sudo wslps ports)${C_0}"
+    elif [ -r "/proc/$pid/stat" ]; then
+      rss=$(ps -o rss= -p "$pid" | tr -d ' ')
+      args=$(ps -o args= -p "$pid" | cut -c1-58)
+    else
+      args="${C_DIM}(exited)${C_0}"
+    fi
+    if [ -n "$rss" ]; then ramcol=$(hum_kb "$rss"); else ramcol="-"; fi
+    printf '  %7s %8s %8s  %s\n' "$port" "${pid:--}" "$ramcol" "$args"
+  done <<< "$rows"
+  echo
+}
+
+# ------------------------------------------------------------ process tree ----
+descendants() {
+  local k
+  for k in $(pgrep -P "$1" || true); do echo "$k"; descendants "$k"; done
+}
+
+ancestors() {
+  local p="$1"
+  while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+    echo "$p"
+    p=$(ps -o ppid= -p "$p" | tr -d ' ' || true)
+  done
+}
+
+# a bare interactive shell / session leader - never climb past one of these
+is_boundary() {
+  local a
+  a=$(ps -o args= -p "$1" | sed 's/^ *//' || true)
+  [ -z "$a" ] && return 0
+  case "$a" in
+    -bash|-zsh|-sh|bash|zsh|sh|fish|login|init|/sbin/init) return 0 ;;
+    /lib/systemd/systemd*|sshd*|tmux*|screen*)             return 0 ;;
+  esac
+  return 1
+}
+
+PROTECTED=""
+build_protected() { PROTECTED=" 1 $$ $(ancestors $$ | tr '\n' ' ') "; }
+is_protected() { case "$PROTECTED" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# climb from a listener pid to the top-most process still part of that server
+climb() {
+  local cur="$1" parent
+  while true; do
+    parent=$(ps -o ppid= -p "$cur" | tr -d ' ' || true)
+    [ -n "$parent" ] || break
+    [ "$parent" -le 1 ] && break
+    is_protected "$parent" && break
+    is_boundary "$parent" && break
+    cur="$parent"
+  done
+  echo "$cur"
+}
+
+tree_cmd() {
+  local pid="$1" p
+  [ -r "/proc/$pid/stat" ] || die "no such process: $pid"
+  printf '%sPROCESS TREE from %s%s\n' "$C_B" "$pid" "$C_0"
+  { echo "$pid"; descendants "$pid"; } | sort -un | while read -r p; do
+      if [ -r "/proc/$p/stat" ]; then ps -o pid=,rss=,args= -p "$p"; fi
+    done | sort -k2,2nr | awk "$AWKLIB"'
+      BEGIN { printf "  %7s %8s  %s\n", "PID", "RAM", "COMMAND" }
+      { a = ""; for (i = 3; i <= NF; i++) a = a (i > 3 ? " " : "") $i
+        printf "  %7s %8s  %s\n", $1, hum($2), shorten(a, 64); t += $2; n++ }
+      END { printf "  %7s %8s  %s\n", "", hum(t), n " process(es) total" }'
+  echo
+}
+
+# ------------------------------------------------------------------- kill ----
+kill_cmd() {
+  local kind="" target="" assume_yes=0 sig=TERM dry=0 a r p
+  local -a roots=() pids=() skipped=() all=() climbed=()
+
+  for a in "$@"; do
+    case "$a" in
+      -y|--yes)     assume_yes=1 ;;
+      -9|--force)   sig=KILL ;;
+      -d|--dry-run) dry=1 ;;
+      port|pid|group)
+        if [ -z "$kind" ]; then kind="$a"; else target="$a"; fi ;;
+      *)
+        if [ -z "$kind" ]; then die "kill needs: port <n> | pid <n> | group <name>"; fi
+        target="$a" ;;
+    esac
+  done
+  if [ -z "$kind" ] || [ -z "$target" ]; then
+    die "usage: wslps kill port <n> | pid <n> | group <name>   [-y] [-9] [-d]"
+  fi
+
+  build_protected
+
+  case "$kind" in
+    port)
+      case "$target" in *[!0-9]*) die "port must be a number" ;; esac
+      mapfile -t roots < <(ss -tlnpH | awk -v p="$target" '
+        { n = split($4, a, ":")
+          if (a[n] == p && match($0, /pid=[0-9]+/))
+            print substr($0, RSTART + 4, RLENGTH - 4) }' | sort -u)
+      [ "${#roots[@]}" -gt 0 ] || die "nothing is listening on port $target (try: wslps ports)"
+      for r in "${roots[@]}"; do climbed+=("$(climb "$r")"); done
+      mapfile -t roots < <(printf '%s\n' "${climbed[@]}" | sort -u)
+      ;;
+    pid)
+      case "$target" in *[!0-9]*) die "pid must be a number" ;; esac
+      [ -r "/proc/$target/stat" ] || die "no such process: $target"
+      [ "$target" -le 1 ] && die "refusing to kill pid $target (init) - that would take down WSL"
+      is_protected "$target" && die "pid $target is your own shell or session - refusing"
+      roots=("$target")
+      ;;
+    group)
+      valid_group "$target" || die "unknown group '$target' (valid: $WS_GROUPS)"
+      mapfile -t roots < <(snapshot | awk -F'\t' -v g="$target" '$6 == g { print $1 }')
+      [ "${#roots[@]}" -gt 0 ] || die "no processes in group '$target'"
+      ;;
+  esac
+
+  for r in "${roots[@]}"; do
+    if is_protected "$r"; then skipped+=("$r"); continue; fi
+    all+=("$r")
+    mapfile -t -O "${#all[@]}" all < <(descendants "$r")
+  done
+  if [ "${#all[@]}" -eq 0 ]; then
+    printf '%sNothing to kill - every match is your own session%s\n' "$C_Y" "$C_0"
+    return 1
+  fi
+
+  for p in $(printf '%s\n' "${all[@]}" | sort -un); do
+    [ -r "/proc/$p/stat" ] || continue
+    if is_protected "$p"; then skipped+=("$p"); else pids+=("$p"); fi
+  done
+
+  if [ "${#pids[@]}" -eq 0 ]; then
+    printf '%sNothing to kill' "$C_Y"
+    [ "${#skipped[@]}" -gt 0 ] && printf ' - every match is your own session'
+    printf '%s\n' "$C_0"
+    return 1
+  fi
+
+  printf '%sWILL STOP%s  %s(SIG%s)%s\n' "$C_B" "$C_0" "$C_DIM" "$sig" "$C_0"
+  for p in "${pids[@]}"; do
+    if [ -r "/proc/$p/stat" ]; then ps -o pid=,rss=,etimes=,args= -p "$p"; fi
+  done | awk "$AWKLIB"'
+    BEGIN { printf "  %7s %8s %8s  %s\n", "PID", "RAM", "UPTIME", "COMMAND" }
+    { a = ""; for (i = 4; i <= NF; i++) a = a (i > 4 ? " " : "") $i
+      printf "  %7s %8s %8s  %s\n", $1, hum($2), dur($3), shorten(a, 56) }'
+
+  local freed
+  freed=$(printf '%s\n' "${pids[@]}" | awk '
+    BEGIN { r = 0; s = 0 }
+    { f = "/proc/" $1 "/status"
+      while ((getline l < f) > 0) {
+        if (l ~ /^VmRSS:/)  { split(l, x, /[ \t]+/); r += x[2] }
+        if (l ~ /^VmSwap:/) { split(l, x, /[ \t]+/); s += x[2] }
+      }
+      close(f) }
+    END { print r "+" s }')
+  printf '  %s%d process(es), frees about %s RAM and %s swap%s\n' "$C_DIM" \
+    "${#pids[@]}" "$(hum_kb "${freed%%+*}")" "$(hum_kb "${freed##*+}")" "$C_0"
+
+  if [ "${#skipped[@]}" -gt 0 ]; then
+    printf '  %skeeping %d pid(s) - your own shell/session: %s%s\n' \
+      "$C_G" "${#skipped[@]}" "${skipped[*]}" "$C_0"
+  fi
+
+  if [ "$dry" = 1 ]; then
+    printf '\n  %sdry run - nothing was killed%s\n' "$C_Y" "$C_0"; return 0
+  fi
+
+  if [ "$assume_yes" != 1 ]; then
+    local reply=""
+    if [ -r /dev/tty ]; then
+      printf '\n%sProceed? [y/N] %s' "$C_Y" "$C_0"
+      read -r reply < /dev/tty || true
+    else
+      die "not a terminal - rerun with -y to confirm"
+    fi
+    case "$reply" in y|Y|yes|YES) ;; *) printf 'aborted\n'; return 1 ;; esac
+  fi
+
+  for p in "${pids[@]}"; do
+    if [ -r "/proc/$p/stat" ]; then kill "-$sig" "$p" || true; fi
+  done
+
+  local i=0 alive=0
+  while [ "$i" -lt 20 ]; do
+    alive=0
+    for p in "${pids[@]}"; do
+      if [ -r "/proc/$p/stat" ]; then alive=$(( alive + 1 )); fi
+    done
+    [ "$alive" -eq 0 ] && break
+    sleep 0.25; i=$(( i + 1 ))
+  done
+
+  if [ "$alive" -eq 0 ]; then
+    printf '%s  stopped %d process(es)%s\n' "$C_G" "${#pids[@]}" "$C_0"
+  else
+    printf '%s  %d process(es) ignored SIG%s - rerun with -9 to force%s\n' \
+      "$C_Y" "$alive" "$sig" "$C_0"
+  fi
+}
+
+# ------------------------------------------------------------------ views ----
+idle_cmd() {
+  printf '%sIDLE - alive a while, barely using CPU (kill candidates)%s\n' "$C_B" "$C_0"
+  printf '  %sheuristic: up > 20 min, lifetime CPU < 1%%, RAM > 20M%s\n' "$C_DIM" "$C_0"
+  local rows
+  rows=$(snapshot | awk -F'\t' '$4 > 1200 && $5 < 1.0 && $2 > 20000 && $6 ~ /^(dev-server|mcp|browser|node|webserver)$/')
+  if [ -z "$rows" ]; then printf '  %s(nothing obviously idle)%s\n\n' "$C_DIM" "$C_0"; return; fi
+  printf '%s\n' "$rows" | awk -F'\t' -v CD="$C_DIM" -v C0="$C_0" "$AWKLIB"'
+    BEGIN { printf "  %7s %8s %8s %7s %8s  %s\n", "PID","RAM","SWAP","CPU%","UPTIME","COMMAND" }
+    { printf "  %7s %8s %8s %6.1f%% %8s  %s\n", $1, hum($2), ($3>0?hum($3):"-"), $5, dur($4), shorten($7, 48)
+      r += $2; s += $3; n++ }
+    END { printf "  %sstopping all %d would return %s RAM and %s swap%s\n", CD, n, hum(r), hum(s), C0 }'
+  echo
+}
+
+port_cmd() {
+  local port="$1" pid root
+  case "$port" in *[!0-9]*) die "port must be a number" ;; esac
+  pid=$(ss -tlnpH | awk -v p="$port" '
+    { n = split($4, a, ":")
+      if (a[n] == p && match($0, /pid=[0-9]+/))
+        print substr($0, RSTART + 4, RLENGTH - 4) }' | sort -u | head -1)
+  [ -n "$pid" ] || die "nothing listening on port $port (try: wslps ports)"
+  build_protected
+  root=$(climb "$pid")
+  printf '%sPORT %s%s\n' "$C_B" "$port" "$C_0"
+  printf '  listener pid : %s\n' "$pid"
+  printf '  command      : %s\n' "$(ps -o args= -p "$pid" | cut -c1-70)"
+  printf '  started      : %s\n' "$(ps -o lstart= -p "$pid" | sed 's/^ *//')"
+  printf '  project dir  : %s\n' "$(readlink "/proc/$pid/cwd" || echo '?')"
+  printf '  server root  : %s  %s<- what "wslps kill port %s" targets%s\n' \
+    "$root" "$C_DIM" "$port" "$C_0"
+  echo
+  tree_cmd "$root"
+}
+
+# ------------------------------------------------------------------- help ----
+usage() {
+  cat <<EOF
+${C_B}wslps${C_0} v$VERSION - what is running in this WSL box, and what it costs
+
+${C_B}USAGE${C_0}
+  wslps [command] [args]
+
+${C_B}LOOKING${C_0}
+  ${C_C}wslps${C_0}                     full report: memory, ports, groups, top processes
+  ${C_C}wslps top${C_0} [N]              N biggest processes by RAM        (default 15)
+  ${C_C}wslps swap${C_0} [N]             N biggest swap hogs               (default 15)
+  ${C_C}wslps idle${C_0}                 long-running processes doing nothing
+  ${C_C}wslps group${C_0} <name>         every process in one group
+  ${C_C}wslps ports${C_0}                everything listening
+  ${C_C}wslps port${C_0} <n>             who owns port n, its project dir, its tree
+  ${C_C}wslps tree${C_0} <pid>           process tree under a pid
+  ${C_C}wslps watch${C_0} [secs]         live refresh, ctrl-c to quit      (default 3)
+
+${C_B}STOPPING${C_0}
+  ${C_C}wslps kill port${C_0} <n>        stop whatever serves port n, plus its children
+  ${C_C}wslps kill pid${C_0} <n>         stop one process plus its children
+  ${C_C}wslps kill group${C_0} <name>    stop every process in a group
+
+  Kill previews exactly what dies and how much it frees, then asks.
+  It refuses to touch your own shell or the session you are typing in.
+
+  ${C_DIM}-y${C_0}   skip the confirmation
+  ${C_DIM}-9${C_0}   SIGKILL instead of SIGTERM (if it ignored the polite ask)
+  ${C_DIM}-d${C_0}   dry run - show the victims, kill nothing
+
+${C_B}GROUPS${C_0}
+  $WS_GROUPS
+
+${C_B}EXAMPLES${C_0}
+  wslps swap                  who is paged out - the real cause of slowness
+  wslps idle                  the dev servers you forgot about
+  wslps port 3111             which project is this, and where does it live
+  wslps kill port 3000        stop that Next dev server cleanly
+  wslps kill group mcp -d     preview reaping every stray MCP process
+  NO_COLOR=1 wslps            plain output for piping or logs
+EOF
+}
+
+report() {
+  SNAP=$(snapshot)
+  header
+  ports_table
+  group_table
+  proc_table "TOP PROCESSES" "${1:-12}" rss "" 1
+  printf '%s  wslps help for commands - nothing above changed anything.%s\n' "$C_DIM" "$C_0"
+}
+
+# ------------------------------------------------------------------- main ----
+cmd="${1:-report}"
+if [ $# -gt 0 ]; then shift; fi
+
+case "$cmd" in
+  help|-h|--help)  usage ;;
+  version|-V)      echo "wslps $VERSION" ;;
+  report)          report "${1:-12}" ;;
+  top)             header; proc_table "TOP PROCESSES" "${1:-15}" rss "" 1 ;;
+  swap)            header; proc_table "SWAP HOGS" "${1:-15}" swap "" 1 ;;
+  idle)            idle_cmd ;;
+  group|g)
+      [ $# -ge 1 ] || die "usage: wslps group <${WS_GROUPS// /|}>"
+      valid_group "$1" || die "unknown group '$1' (valid: $WS_GROUPS)"
+      proc_table "$(echo "$1" | tr '[:lower:]' '[:upper:]') PROCESSES" 200 rss "$1" 0 ;;
+  ports)           ports_table ;;
+  port)            [ $# -ge 1 ] || die "usage: wslps port <n>"; port_cmd "$1" ;;
+  tree)            [ $# -ge 1 ] || die "usage: wslps tree <pid>"; tree_cmd "$1" ;;
+  kill|k)          kill_cmd "$@" ;;
+  watch|w)
+      trap 'printf "\033[?25h\n"; exit 0' INT TERM
+      printf '\033[?25l'
+      while true; do
+        out=$(report 10)
+        printf '\033[H\033[2J%s\n' "$out"
+        sleep "${1:-3}"
+      done ;;
+  -*)              nocolour; report ;;
+  *)               die "unknown command '$cmd' - try: wslps help" ;;
+esac
