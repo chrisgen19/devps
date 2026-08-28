@@ -1,0 +1,130 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck --version
+
+      - name: shellcheck
+        run: shellcheck --severity=style --format=gcc wslps scripts/bump
+
+      - name: Parse check
+        run: |
+          bash -n wslps
+          bash -n scripts/bump
+
+      - name: Executable bit is committed
+        run: |
+          mode=$(git ls-files -s wslps | awk '{print $1}')
+          echo "mode=$mode"
+          if [ "$mode" != "100755" ]; then
+            echo "::error::wslps must be committed executable (100755), found $mode"
+            exit 1
+          fi
+
+  smoke:
+    name: smoke test
+    runs-on: ubuntu-latest
+    env:
+      NO_COLOR: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies are present
+        run: |
+          for t in ps pgrep ss awk; do
+            command -v "$t" > /dev/null || { echo "::error::missing $t"; exit 1; }
+          done
+
+      - name: Read-only commands exit clean
+        run: |
+          ./wslps version
+          ./wslps help
+          ./wslps
+          ./wslps top 5
+          ./wslps swap 5
+          ./wslps idle
+          ./wslps ports
+          ./wslps group node
+          ./wslps tree $$
+
+      - name: Bad input exits non-zero
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          if ./wslps bogus;        then fail "unknown command should exit non-zero"; fi
+          if ./wslps group nope;   then fail "unknown group should exit non-zero"; fi
+          if ./wslps kill;         then fail "kill with no target should exit non-zero"; fi
+          if ./wslps kill pid abc; then fail "non-numeric pid should exit non-zero"; fi
+          if ./wslps port 65999;   then fail "unused port should exit non-zero"; fi
+          echo "all bad input rejected"
+
+      # These guard the three kill protections. If any regress, the tool becomes
+      # capable of taking down the machine it runs on, so they are hard failures.
+      - name: Safety guards hold
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+
+          if ./wslps kill pid 1 -d 2> err.txt; then
+            cat err.txt; fail "kill pid 1 must be refused"
+          fi
+          grep -q "refusing to kill pid 1" err.txt || {
+            cat err.txt; fail "kill pid 1 was refused for the wrong reason"
+          }
+
+          if ./wslps kill pid $$ -d 2> err.txt; then
+            cat err.txt; fail "killing our own session must be refused"
+          fi
+          grep -q "your own shell or session" err.txt || {
+            cat err.txt; fail "self-kill was refused for the wrong reason"
+          }
+          echo "refusals intact"
+
+      - name: Dry run reports itself and kills nothing
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+
+          sleep 300 &
+          victim=$!
+
+          ./wslps kill pid "$victim" -d > dry.txt || { cat dry.txt; fail "dry run should exit 0"; }
+          grep -q "dry run - nothing was killed" dry.txt || {
+            cat dry.txt; fail "dry run did not report itself as a dry run"
+          }
+          kill -0 "$victim" || fail "dry run actually killed the process"
+
+          kill "$victim"
+          echo "dry run is inert"
+
+      - name: A real kill actually kills
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+
+          sleep 300 &
+          victim=$!
+
+          ./wslps kill pid "$victim" -y > out.txt || { cat out.txt; fail "kill should exit 0"; }
+          cat out.txt
+
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            kill -0 "$victim" || break
+            sleep 0.5
+          done
+          if kill -0 "$victim"; then fail "process survived kill"; fi
+          echo "kill works"

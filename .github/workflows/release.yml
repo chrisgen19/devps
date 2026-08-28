@@ -1,0 +1,58 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A tag that disagrees with the script's own VERSION means `wslps version`
+      # would lie to everyone who installs it. Refuse to publish that.
+      - name: Tag matches VERSION in wslps
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          script=$(sed -n 's/^VERSION=\([0-9][0-9.]*\)$/\1/p' wslps | head -1)
+          echo "tag=$tag script=$script"
+          if [ -z "$script" ]; then
+            echo "::error::could not read VERSION= from wslps"
+            exit 1
+          fi
+          if [ "$tag" != "$script" ]; then
+            echo "::error::tag v$tag does not match VERSION=$script in wslps"
+            exit 1
+          fi
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Lint before publishing
+        run: |
+          shellcheck --severity=style --format=gcc wslps
+          bash -n wslps
+
+      - name: Smoke test
+        env:
+          NO_COLOR: "1"
+        run: |
+          ./wslps version
+          ./wslps help
+          ./wslps
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            wslps
