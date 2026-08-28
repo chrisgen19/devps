@@ -101,6 +101,8 @@ header() {
   st=$(meminfo SwapTotal); sf=$(meminfo SwapFree); su=$(( st - sf ))
   read -r l1 l5 l15 _ < /proc/loadavg
   cores=$(nproc)
+  # pgrep cannot filter on process state, so ps + grep is the right tool here
+  # shellcheck disable=SC2009
   dstate=$(ps -eo stat= | grep -c '^D' || true)
 
   printf '%s%s WSL RESOURCES %s %s%s  up %s%s\n\n' "$C_B" "$C_C" "$C_0" \
