@@ -203,15 +203,20 @@ Verify the host side with `Get-CimInstance Win32_PageFileUsage` (active pagefile
 ## Development
 
 ```bash
-shellcheck --severity=style wslps scripts/bump
-bash -n wslps
+shellcheck --severity=style wslps scripts/bump scripts/selftest
+scripts/selftest
 ```
 
-CI runs both on pushes to `main` and on every pull request, and additionally
-asserts the kill
-guards still hold: that pid 1 is refused, that the caller's own session is
-refused, that a dry run signals nothing, and that a real kill actually reaps a
-throwaway process.
+`scripts/selftest` is the whole test suite and runs anywhere. It only ever
+signals throwaway processes it starts itself. Alongside the read-only commands
+and input validation, it asserts the kill guards still hold: that pid 1 is
+refused, that the caller's own session is refused, that a dry run signals
+nothing, and that a real kill actually reaps a throwaway process.
+
+Both the ci and release workflows call that same script, so a tagged release
+cannot publish a build whose guards have regressed. Tag pushes do not trigger
+`ci.yml`, and GitHub will not make the release job wait on a run for the same
+commit on `main`, so the release workflow has to run the suite itself.
 
 ### Releasing
 

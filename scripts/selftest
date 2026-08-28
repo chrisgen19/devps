@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# selftest - assert wslps behaves, and that its kill guards still hold.
+#
+# Run it anywhere: it only ever signals throwaway processes it started itself.
+# Both the ci and release workflows call this, so a release cannot publish a
+# build whose safety guards have regressed.
+
+set -uo pipefail
+
+cd "$(dirname "$0")/.." || exit 1
+
+export NO_COLOR=1
+WSLPS=./wslps
+BUMP=./scripts/bump
+fails=0
+
+pass() { printf '  ok    %s\n' "$1"; }
+fail() { printf '  FAIL  %s\n' "$1" >&2; fails=$(( fails + 1 )); }
+group() { printf '\n%s\n' "$1"; }
+
+# ok <description> <command...>   - command must succeed
+ok() {
+  local desc="$1"; shift
+  if "$@" > /dev/null; then pass "$desc"; else fail "$desc (exit $?)"; fi
+}
+
+# rejects <description> <command...>   - command must fail
+rejects() {
+  local desc="$1"; shift
+  if "$@" > /dev/null 2>&1; then fail "$desc (unexpectedly succeeded)"; else pass "$desc"; fi
+}
+
+[ -x "$WSLPS" ] || { echo "selftest: no executable $WSLPS here" >&2; exit 1; }
+
+group "dependencies"
+for t in ps pgrep ss awk; do
+  if command -v "$t" > /dev/null; then pass "$t present"; else fail "$t missing"; fi
+done
+
+group "read-only commands exit clean"
+ok "version"      "$WSLPS" version
+ok "help"         "$WSLPS" help
+ok "report"       "$WSLPS"
+ok "top"          "$WSLPS" top 5
+ok "swap"         "$WSLPS" swap 5
+ok "idle"         "$WSLPS" idle
+ok "ports"        "$WSLPS" ports
+ok "group node"   "$WSLPS" group node
+ok "tree self"    "$WSLPS" tree $$
+
+group "bad input is rejected"
+rejects "unknown command"   "$WSLPS" bogus
+rejects "unknown group"     "$WSLPS" group nope
+rejects "kill with no args" "$WSLPS" kill
+rejects "non-numeric pid"   "$WSLPS" kill pid abc
+rejects "unused port"       "$WSLPS" port 65999
+
+group "version bumper rejects malformed versions"
+for v in 1.2 1.2.3.4 1.2.3.4.5 sideways 1..3 01.2.3 1.02.3 2.0.08 ""; do
+  rejects "bump '$v'" "$BUMP" "$v"
+done
+rejects "bump with no argument" "$BUMP"
+
+# ---------------------------------------------------------------------------
+# The kill guards. If any of these regress the tool can take down the machine
+# it runs on, so they are the reason this script is gated on before release.
+# ---------------------------------------------------------------------------
+group "kill guards"
+
+err=$(mktemp)
+trap 'rm -f "$err"' EXIT
+
+if "$WSLPS" kill pid 1 -d > /dev/null 2> "$err"; then
+  fail "kill pid 1 must be refused"
+elif grep -q "refusing to kill pid 1" "$err"; then
+  pass "kill pid 1 is refused"
+else
+  fail "kill pid 1 refused for the wrong reason: $(cat "$err")"
+fi
+
+if "$WSLPS" kill pid $$ -d > /dev/null 2> "$err"; then
+  fail "killing our own session must be refused"
+elif grep -q "your own shell or session" "$err"; then
+  pass "own session is refused"
+else
+  fail "self-kill refused for the wrong reason: $(cat "$err")"
+fi
+
+group "dry run is inert"
+sleep 300 &
+victim=$!
+if "$WSLPS" kill pid "$victim" -d | grep -q "dry run - nothing was killed"; then
+  pass "dry run reports itself"
+else
+  fail "dry run did not report itself"
+fi
+if kill -0 "$victim" 2> /dev/null; then
+  pass "dry run left the process alive"
+else
+  fail "dry run actually killed the process"
+fi
+kill "$victim" 2> /dev/null
+wait "$victim" 2> /dev/null
+
+group "a real kill actually kills"
+sleep 300 &
+victim=$!
+if "$WSLPS" kill pid "$victim" -y > /dev/null; then
+  pass "kill exited clean"
+else
+  fail "kill did not exit clean"
+fi
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  kill -0 "$victim" 2> /dev/null || break
+  sleep 0.5
+done
+if kill -0 "$victim" 2> /dev/null; then
+  fail "process survived kill"
+  kill -9 "$victim" 2> /dev/null
+else
+  pass "process was reaped"
+fi
+wait "$victim" 2> /dev/null
+
+printf '\n'
+if [ "$fails" -eq 0 ]; then
+  printf 'selftest: all checks passed\n'
+  exit 0
+fi
+printf 'selftest: %d check(s) failed\n' "$fails" >&2
+exit 1
