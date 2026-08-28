@@ -75,6 +75,15 @@ jobs:
           if ./wslps port 65999;   then fail "unused port should exit non-zero"; fi
           echo "all bad input rejected"
 
+      - name: Version bumper rejects malformed versions
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          for v in 1.2 1.2.3.4 1.2.3.4.5 sideways 1..3 ""; do
+            if ./scripts/bump "$v"; then fail "bump accepted '$v'"; fi
+          done
+          if ./scripts/bump; then fail "bump accepted no argument"; fi
+          echo "bump rejects malformed versions"
+
       # These guard the three kill protections. If any regress, the tool becomes
       # capable of taking down the machine it runs on, so they are hard failures.
       - name: Safety guards hold

@@ -19,10 +19,10 @@ jobs:
       - name: Tag matches VERSION in wslps
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          script=$(sed -n 's/^VERSION=\([0-9][0-9.]*\)$/\1/p' wslps | head -1)
+          script=$(sed -n 's/^VERSION=\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' wslps | head -1)
           echo "tag=$tag script=$script"
           if [ -z "$script" ]; then
-            echo "::error::could not read VERSION= from wslps"
+            echo "::error::could not read a valid X.Y.Z VERSION= from wslps"
             exit 1
           fi
           if [ "$tag" != "$script" ]; then

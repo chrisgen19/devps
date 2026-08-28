@@ -207,7 +207,8 @@ shellcheck --severity=style wslps scripts/bump
 bash -n wslps
 ```
 
-CI runs both on every push and pull request, and additionally asserts the kill
+CI runs both on pushes to `main` and on every pull request, and additionally
+asserts the kill
 guards still hold: that pid 1 is refused, that the caller's own session is
 refused, that a dry run signals nothing, and that a real kill actually reaps a
 throwaway process.
