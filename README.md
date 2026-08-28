@@ -1,5 +1,7 @@
 # wslps
 
+[![ci](https://github.com/chrisgen19/wslps/actions/workflows/ci.yml/badge.svg)](https://github.com/chrisgen19/wslps/actions/workflows/ci.yml)
+
 See what is running inside your WSL2 instance, what it actually costs, and stop it safely.
 
 A single dependency-free bash script. No install step beyond dropping it on your `PATH`.
@@ -197,3 +199,30 @@ sparseVhd=true
 ```
 
 Verify the host side with `Get-CimInstance Win32_PageFileUsage` (active pagefiles) rather than `Win32_PageFileSetting` (merely configured). A pagefile registered on a non-system drive can be silently deleted at every boot and contribute nothing to the commit limit.
+
+## Development
+
+```bash
+shellcheck --severity=style wslps scripts/bump
+bash -n wslps
+```
+
+CI runs both on every push and pull request, and additionally asserts the kill
+guards still hold: that pid 1 is refused, that the caller's own session is
+refused, that a dry run signals nothing, and that a real kill actually reaps a
+throwaway process.
+
+### Releasing
+
+```bash
+scripts/bump patch      # 2.0.0 -> 2.0.1, commits and tags
+git push origin main && git push origin v2.0.1
+```
+
+Pushing a `v*` tag builds a GitHub Release. The release workflow refuses any tag
+that disagrees with `VERSION` inside the script, so a published build can never
+report a version it is not.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
