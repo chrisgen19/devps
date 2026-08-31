@@ -368,7 +368,7 @@ Kernel threads are excluded.
 - **Orphan detection looks for ppid 1.** Under a process supervisor or an agent that makes itself a subreaper, an abandoned process is reparented to that instead of to init, and will not be flagged.
 - **`IO/s` only covers your own processes.** `/proc/<pid>/io` needs ptrace access; other users' processes report `-`. The read is skipped entirely for commands that do not show the column.
 - **`projects` can only see your own processes.** A working directory is readable for processes you own; anything else lands in the `(cwd not readable)` bucket rather than being guessed at.
-- **`doctor` needs Windows interop** for host RAM and the VHDX location. Without it those rows read `unknown` and the rest of the checks still run.
+- **`doctor` needs Windows interop** for host RAM, the active Windows profile and the VHDX location. Without it, it falls back to searching for a `.wslconfig` and says so when more than one profile has one, and the VHDX is matched by distro name in the install path or reported as not located. It never pairs another distro's disk with this one's usage.
 - **PSI needs a kernel built with `CONFIG_PSI`.** Every current WSL2 kernel has it. Without it, wslps falls back to load average and the D-state count.
 - Set `NO_COLOR=1` for plain output when piping or logging.
 

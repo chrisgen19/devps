@@ -1583,18 +1583,22 @@ port_map() {
 # view and by "kill project". Results are cached per directory: a dev server's
 # processes nearly all share one cwd.
 PROOTLIB='
-  function exists(f,   r) { r = (getline < f); close(f); return r >= 0 }
+  # read into a variable: a bare getline from a file overwrites the current
+  # record and its fields, and this runs from inside a rule that still needs them
+  function exists(f,   line, r) { r = (getline line < f); close(f); return r >= 0 }
   function ismark(p,   i, ok) {
     if (p in mc) return mc[p]
     ok = 0
     for (i = 1; i <= nm; i++) if (exists(p "/" m[i])) { ok = 1; break }
     return mc[p] = ok
   }
-  function proot(d,   p, i) {
+  function proot(d,   p) {
     if (d in rc) return rc[d]
     p = d
-    for (i = 0; i < 12; i++) {
-      if (p == "" || p == "/") break
+    # all the way to /: a pnpm store or a monorepo package can sit a dozen
+    # levels under its own root, and a depth cap would quietly file those
+    # processes under "not in a project"
+    while (p != "" && p != "/") {
       if (ismark(p)) return rc[d] = p
       sub(/\/[^\/]*$/, "", p)
     }
@@ -1644,12 +1648,13 @@ project_pids() {
     -v WANT="$1" -v HOME="$HOME" "$PROOTLIB"'
     $1 == "C" { cwd[$2] = $3; next }
     $1 == "S" {
-      if (!($2 in cwd)) next
-      r = proot(cwd[$2])
+      pid = $2
+      if (!(pid in cwd)) next
+      r = proot(cwd[pid])
       if (r == "") next
       b = r; sub(/^.*\//, "", b)
       w = WANT; sub("^~/", HOME "/", w); sub("/$", "", w)
-      if (r == w || b == WANT) printf "%s\t%s\n", r, $2
+      if (r == w || b == WANT) printf "%s\t%s\n", r, pid
     }'
 }
 
@@ -1713,15 +1718,24 @@ cfg_kb() {
 declare -A CFG=()
 CFG_PATH=""
 
+CFG_AMBIGUOUS=0
 read_wslconfig() {
-  local f k v line
-  CFG=(); CFG_PATH=""
-  for f in /mnt/c/Users/*/.wslconfig; do [ -r "$f" ] && CFG_PATH="$f" && break; done
-  if [ -z "$CFG_PATH" ] && command -v cmd.exe > /dev/null; then
-    # the glob missed it, so ask Windows where the profile actually is
-    local up
-    up=$(cd /mnt/c && cmd.exe /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r')
-    [ -n "$up" ] && f=$(wslpath -u "$up" 2>/dev/null)/.wslconfig && [ -r "$f" ] && CFG_PATH="$f"
+  local f k v line n=0
+  CFG=(); CFG_PATH=""; CFG_AMBIGUOUS=0
+  # Ask Windows which profile is running WSL before guessing. A host with more
+  # than one profile can easily have more than one .wslconfig, and reporting a
+  # different user's memory cap is worse than reporting none.
+  if [ -n "$WIN_PROFILE" ]; then
+    f=$(wslpath -u "$WIN_PROFILE" 2>/dev/null)/.wslconfig
+    [ -r "$f" ] && CFG_PATH="$f"
+  fi
+  if [ -z "$CFG_PATH" ]; then
+    for f in /mnt/*/Users/*/.wslconfig; do
+      [ -r "$f" ] || continue
+      n=$(( n + 1 ))
+      [ -z "$CFG_PATH" ] && CFG_PATH="$f"
+    done
+    [ "$n" -gt 1 ] && CFG_AMBIGUOUS=$n
   fi
   [ -n "$CFG_PATH" ] || return 1
   while IFS= read -r line; do
@@ -1737,16 +1751,23 @@ read_wslconfig() {
   ' "$CFG_PATH")
 }
 
-WIN_RAM_KB=""; WIN_BASE=""
+WIN_RAM_KB=""; WIN_PROFILE=""; WIN_DISTROS=""
 read_windows() {
   command -v powershell.exe > /dev/null || return 1
   local out
-  # one interop call, not two: each costs about a third of a second
+  # one interop call, not three: each costs about a third of a second. The
+  # distro list is name<TAB>path per line, because a BasePath can contain
+  # spaces ("\Program Files\...") and must never be word-split.
   out=$(cd / && powershell.exe -NoProfile -Command \
-    "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory; (Get-ChildItem HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss | ForEach-Object { (Get-ItemProperty \$_.PSPath).BasePath }) -join ';'" \
+    "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+     \$env:USERPROFILE
+     Get-ChildItem HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss |
+       ForEach-Object { \$p = Get-ItemProperty \$_.PSPath
+                        \"\$(\$p.DistributionName)\`t\$(\$p.BasePath)\" }" \
     2>/dev/null | tr -d '\r') || return 1
   WIN_RAM_KB=$(printf '%s' "$out" | sed -n '1p' | awk '{ printf "%d", $1 / 1024 }')
-  WIN_BASE=$(printf '%s' "$out" | sed -n '2p')
+  WIN_PROFILE=$(printf '%s' "$out" | sed -n '2p')
+  WIN_DISTROS=$(printf '%s' "$out" | sed -n '3,$p')
   [ -n "$WIN_RAM_KB" ]
 }
 
@@ -1765,11 +1786,16 @@ doctor_cmd() {
   fi
 
   mt=$(meminfo MemTotal); st=$(meminfo SwapTotal)
+  read_windows || true          # before the config: it says which profile to read
 
   # ---- .wslconfig --------------------------------------------------------
   printf '  %sCONFIG%s\n' "$C_B" "$C_0"
   if read_wslconfig; then
     doc_row "file" "$CFG_PATH"
+    if [ "$CFG_AMBIGUOUS" -gt 0 ]; then
+      doc_row "" "${C_Y}${CFG_AMBIGUOUS} profiles have one and interop is unavailable - this may not be yours${C_0}"
+      finding warn "picked one of $CFG_AMBIGUOUS .wslconfig files without being able to ask Windows which profile runs WSL"
+    fi
     # keys are folded to lower case when parsed; print them the way the docs
     # spell them, so a line can be copied straight back into the file
     for f in wsl2.memory:memory wsl2.processors:processors wsl2.swap:swap \
@@ -1786,7 +1812,7 @@ doctor_cmd() {
 
   # ---- host --------------------------------------------------------------
   printf '  %sHOST%s\n' "$C_B" "$C_0"
-  if read_windows; then
+  if [ -n "$WIN_RAM_KB" ]; then
     doc_row "windows RAM" "$(hum_kb "$WIN_RAM_KB")"
     mem_kb=$(cfg_kb "${CFG[wsl2.memory]:-}")
     if [ -n "$mem_kb" ]; then
@@ -1890,18 +1916,34 @@ doctor_cmd() {
     "$C_DIM" "${CFG_PATH:-%USERPROFILE%\\.wslconfig}" "$C_0"
 }
 
-# the distro's VHDX, from the registry when interop works, by search otherwise
+# The VHDX of *this* distro. Matching on the registry DistributionName matters:
+# a host commonly has several (Docker Desktop registers two of its own), and
+# pairing another distro's file size with this one's internal usage would make
+# every disk finding meaningless. If the distro cannot be identified, say so
+# rather than report a number for the wrong disk.
 find_vhdx() {
-  local b p
-  if [ -z "$WIN_BASE" ]; then read_windows || true; fi
-  for b in ${WIN_BASE//;/ }; do
-    b=${b#\\\\?\\}
-    p=$(wslpath -u "$b" 2>/dev/null)/ext4.vhdx
-    [ -r "$p" ] && { printf '%s' "$p"; return 0; }
-  done
+  # Some registry paths carry an extended-length prefix that wslpath rejects.
+  # It has to live in a variable: written inline the pattern silently fails to
+  # strip anything, because the trailing backslash escapes the closing quote.
+  local want=${WSL_DISTRO_NAME:-} dn base p unc=$'\\\\?\\'
+  [ -n "$want" ] || return 1
+  [ -n "$WIN_DISTROS" ] || read_windows || true
+  if [ -n "$WIN_DISTROS" ]; then
+    while IFS=$'\t' read -r dn base; do
+      [ "$dn" = "$want" ] || continue
+      base=${base#"$unc"}
+      p=$(wslpath -u "$base" 2>/dev/null)/ext4.vhdx
+      [ -r "$p" ] && { printf '%s' "$p"; return 0; }
+    done <<< "$WIN_DISTROS"
+  fi
+  # no interop: the install path carries the distro name, so it can still be
+  # matched rather than picking whichever file the glob happens to hit first
   for p in /mnt/*/Users/*/AppData/Local/Packages/*/LocalState/ext4.vhdx \
            /mnt/*/Users/*/AppData/Local/wsl/*/ext4.vhdx; do
-    [ -r "$p" ] && { printf '%s' "$p"; return 0; }
+    [ -r "$p" ] || continue
+    case "${p,,}" in
+      *"${want,,}"*) printf '%s' "$p"; return 0 ;;
+    esac
   done
   return 1
 }
