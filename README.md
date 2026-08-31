@@ -148,6 +148,10 @@ What it shows that the one-shot report cannot:
   samples, not the lifetime average `ps` reports, so a process that was busy an
   hour ago no longer looks busy now
 - **new processes** - a pid that appeared since the last sample is highlighted
+- **a colour per group** - `mcp` red, `ai-agent` orange, `dev-server` azure,
+  `browser` blue, `editor` violet, `database` gold, `webserver` teal, `node`
+  green, `other` grey. The same colour follows a group into every table, in the
+  dashboard and in the one-shot report; `wslps help` prints the legend
 - **the same five views** you already have as commands, on keys `1`-`5`
 
 | Key | Does |

@@ -11,6 +11,37 @@ VERSION=2.0.0
 UI_COLOR=0; UI_UNICODE=0
 RAMP=(); BLK=(); SPK=(); SPIN=(); BAR_EMPTY="."
 
+# One colour per group, so a group reads the same in every table it appears in.
+# Categorical, not a heat scale: these say "what kind of thing", while the RAM
+# and CPU columns keep green/amber/red for "how much".
+declare -A GCOL=()
+GCOLS_STR=""
+
+group_palette() {
+  local g
+  GCOL=()
+  if [ "$UI_COLOR" -ge 2 ]; then
+    GCOL[mcp]=$'\033[38;5;203m'        # red
+    GCOL[ai-agent]=$'\033[38;5;214m'   # orange
+    GCOL[dev-server]=$'\033[38;5;45m'  # azure
+    GCOL[browser]=$'\033[38;5;75m'     # blue
+    GCOL[editor]=$'\033[38;5;141m'     # violet
+    GCOL[database]=$'\033[38;5;221m'   # gold
+    GCOL[webserver]=$'\033[38;5;79m'   # teal
+    GCOL[node]=$'\033[38;5;114m'       # green
+    GCOL[other]=$'\033[38;5;244m'      # grey
+  elif [ "$UI_COLOR" -eq 1 ]; then
+    GCOL[mcp]=$'\033[31m'      GCOL[ai-agent]=$'\033[33m'
+    GCOL[dev-server]=$'\033[36m'  GCOL[browser]=$'\033[34m'
+    GCOL[editor]=$'\033[35m'   GCOL[database]=$'\033[1;33m'
+    GCOL[webserver]=$'\033[1;36m' GCOL[node]=$'\033[32m'
+    GCOL[other]=$'\033[2m'
+  fi
+  # flattened for awk: group=escape|group=escape|...
+  GCOLS_STR=""
+  for g in "${!GCOL[@]}"; do GCOLS_STR+="${g}=${GCOL[$g]}|"; done
+}
+
 palette() {
   if [ "$UI_COLOR" -ge 2 ]; then
     C_DIM=$'\033[38;5;244m'; C_B=$'\033[1m'
@@ -42,6 +73,7 @@ palette() {
     SPIN=("|" "/" "-" "\\")
     BAR_EMPTY="."
   fi
+  group_palette
 }
 
 ui_detect() {
@@ -145,6 +177,15 @@ function dur(s,   d, h, m) {
   if (h) return sprintf("%dh%02dm", h, m)
   return sprintf("%dm", m)
 }
+function gcol(g) {
+  if (!gc_ready) {
+    gc_ready = 1
+    gc_n = split(GCOLS, gc_a, "|")
+    for (gc_i = 1; gc_i <= gc_n; gc_i++)
+      if (split(gc_a[gc_i], gc_b, "=") == 2) GC[gc_b[1]] = gc_b[2]
+  }
+  return (g in GC) ? GC[g] : ""
+}
 function shorten(a, w,   s) {
   s = a
   sub(/^\/[^ ]*\//, "", s)
@@ -155,6 +196,13 @@ function shorten(a, w,   s) {
 '
 
 WS_GROUPS="mcp ai-agent dev-server browser editor database webserver node other"
+
+# the group list, each name in its own colour - doubles as the colour legend
+group_legend() {
+  local g out=""
+  for g in $WS_GROUPS; do out+="${GCOL[$g]:-}${g}${C_0} "; done
+  printf '%s' "$out"
+}
 
 # ---------------------------------------------------------------- helpers ----
 meminfo() { awk -v k="$1" '$1 == k":" { print $2; exit }' /proc/meminfo; }
@@ -272,6 +320,7 @@ header() {
 # ----------------------------------------------------------------- tables ----
 group_table() {
   snap | awk -F'\t' -v ORDER="$WS_GROUPS" -v CB="$C_B" -v CD="$C_DIM" -v C0="$C_0" \
+  -v GCOLS="$GCOLS_STR" \
   "$AWKLIB"'
   { n[$6]++; r[$6] += $2; s[$6] += $3; tn++; tr += $2; ts += $3 }
   END {
@@ -289,7 +338,7 @@ group_table() {
       g = o[bi]; done[g] = 1
       w = (tr > 0) ? int(r[g] * 100 / tr / 4 + 0.5) : 0
       b = ""; for (k = 0; k < w; k++) b = b "#"
-      printf "  %-12s %6d %9s %9s   %s%s%s\n", g, n[g], hum(r[g]),
+      printf "  %s%-12s%s %6d %9s %9s   %s%s%s\n", gcol(g), g, C0, n[g], hum(r[g]),
              (s[g] > 0 ? hum(s[g]) : "-"), CD, b, C0
     }
     printf "  %s%-12s %6d %9s %9s%s\n\n", CD, "TOTAL", tn, hum(tr),
@@ -308,14 +357,16 @@ proc_table() {
     return
   fi
   printf '%s%s%s\n' "$C_B" "$title" "$C_0"
-  printf '%s\n' "$input" | head -n "$limit" | awk -F'\t' -v SHOWG="$showg" "$AWKLIB"'
+  printf '%s\n' "$input" | head -n "$limit" | awk -F'\t' -v SHOWG="$showg" \
+    -v C0="$C_0" -v GCOLS="$GCOLS_STR" "$AWKLIB"'
   BEGIN {
     if (SHOWG) printf "  %7s %8s %8s  %-11s %8s  %s\n", "PID","RAM","SWAP","GROUP","UPTIME","COMMAND"
     else       printf "  %7s %8s %8s %8s  %s\n",        "PID","RAM","SWAP","UPTIME","COMMAND"
   }
   {
     sw = ($3 > 0 ? hum($3) : "-")
-    if (SHOWG) printf "  %7s %8s %8s  %-11s %8s  %s\n", $1, hum($2), sw, $6, dur($4), shorten($7, 58)
+    if (SHOWG) printf "  %7s %8s %8s  %s%-11s%s %8s  %s\n", $1, hum($2), sw,
+                      gcol($6), $6, C0, dur($4), shorten($7, 58)
     else       printf "  %7s %8s %8s %8s  %s\n",        $1, hum($2), sw, dur($4), shorten($7, 66)
   }'
   echo
@@ -779,7 +830,7 @@ dash_rows_idle() {
 # selection pointer cannot be eaten by a colour reset inside the row
 dash_fmt_proc() {
   awk -F'\t' -v W="$TCOLS" -v CD="$C_DIM" -v C0="$C_0" -v CR="$C_R" -v CY="$C_Y" \
-      -v CG="$C_G" -v CC="$C_C" -v CN="$C_NEW" \
+      -v CG="$C_G" -v CN="$C_NEW" -v GCOLS="$GCOLS_STR" \
       -v BLKS="$(IFS=,; printf '%s' "${BLK[*]}")" -v EMPTY="$BAR_EMPTY" "$AWKLIB"'
   function micro(v, mx, w,   f, s, i) {
     if (mx <= 0) mx = 1
@@ -807,7 +858,7 @@ dash_fmt_proc() {
         printf "%s%7s%s %s%8s%s %s%s%s %s%7s%s %s%5.1f%%%s %s%s%s %s%8s%s %s%-10s%s %s\n",
           pc, f[1], C0, rc, hum(f[2]), C0, rc, micro(f[2], mx, 8), C0,
           swc, sw, C0, cc, cpu, C0, cc, micro(cpu, mxc, 5), C0,
-          CD, dur(f[4]), C0, CC, f[6], C0, shorten(f[7], cmdw)
+          CD, dur(f[4]), C0, gcol(f[6]), f[6], C0, shorten(f[7], cmdw)
       else
         printf "%s%7s%s %s%8s%s %s%7s%s %s%5.1f%%%s %s%8s%s %s\n",
           pc, f[1], C0, rc, hum(f[2]), C0, swc, sw, C0,
@@ -861,7 +912,7 @@ dash_hdr_ports() { printf '%7s %8s %8s %6s  %s' PORT PID RAM "CPU%" PROCESS; }
 
 dash_group_lines() {
   printf '%s\n' "$SNAP_ROWS" | awk -F'\t' -v ORDER="$WS_GROUPS" \
-    -v CD="$C_DIM" -v C0="$C_0" -v CC="$C_C" -v CG="$C_G" -v CY="$C_Y" \
+    -v CD="$C_DIM" -v C0="$C_0" -v CG="$C_G" -v CY="$C_Y" -v GCOLS="$GCOLS_STR" \
     -v BLKS="$(IFS=,; printf '%s' "${BLK[*]}")" -v EMPTY="$BAR_EMPTY" "$AWKLIB"'
     { n[$6]++; r[$6] += $2; s[$6] += $3; c[$6] += $9; tr += $2; tn++ }
     END {
@@ -878,7 +929,7 @@ dash_group_lines() {
         b = ""
         for (k = 0; k < 24; k++) b = b (k < w ? blk[8] : EMPTY)
         printf "%s%-12s%s %s%5d%s %s%9s%s %s%8s%s %s%5.1f%%%s  %s%s%s\n",
-          CC, g, C0, CD, n[g], C0, CG, hum(r[g]), C0,
+          gcol(g), g, C0, CD, n[g], C0, CG, hum(r[g]), C0,
           CY, (s[g] > 0 ? hum(s[g]) : "-"), C0, CD, c[g], C0, CG, b, C0
       }
     }'
@@ -1302,7 +1353,8 @@ ${C_B}DASHBOARD${C_0} ${C_DIM}(wslps dash)${C_0}
   terminal, when NO_COLOR is set, or when WSLPS_ASCII is set.
 
 ${C_B}GROUPS${C_0}
-  $WS_GROUPS
+  $(group_legend)
+  ${C_DIM}each group keeps its colour in every table${C_0}
 
 ${C_B}EXAMPLES${C_0}
   wslps dash                  the live dashboard - watch RAM move, kill from it
