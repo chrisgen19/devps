@@ -130,10 +130,15 @@ abar() { _abar "$@"; printf '%s' "$REPLY"; }
 # like a pegged 100%, which is a lie a resource monitor cannot afford.
 _spark() {
   local -n vals=$1
-  local out="" v mx=${2:-0} idx col last=""
+  local out="" v mx=${2:-0} budget=${3:-32} n=${#vals[@]} idx col last=""
+  # the slice below is a negative offset: asking for more than the array holds
+  # is an expansion error, not a short read
+  [ "$budget" -gt "$n" ] && budget=$n
+  if [ "$budget" -lt 1 ]; then REPLY=""; return 0; fi
   [ "$mx" -gt 0 ] || for v in "${vals[@]}"; do [ "$v" -gt "$mx" ] && mx=$v; done
   [ "$mx" -gt 0 ] || mx=1
-  for v in "${vals[@]}"; do
+  # keep the newest samples: a truncated sparkline should lose its left edge
+  for v in "${vals[@]: -budget}"; do
     idx=$(( v * 7 / mx )); [ "$idx" -lt 0 ] && idx=0
     if [ "$UI_COLOR" -ge 2 ]; then
       case $(( v * 100 / (mx > 0 ? mx : 1) )) in
@@ -907,8 +912,10 @@ dash_rows_proc() {
   local limit="$1" key rows
   key=$(dash_sortkey)
   rows=$(printf '%s\n' "$SNAP_ROWS" | sort -t$'\t' -k"$key","$key"nr)
+  # index(), not ~: a filter is whatever the user typed. As an ERE, "c++" would
+  # quietly match every c, and "[" would abort awk and empty the view
   [ -n "$DASH_FILTER" ] && rows=$(printf '%s\n' "$rows" | awk -F'\t' -v f="$DASH_FILTER" \
-    'BEGIN { f = tolower(f) } tolower($7) ~ f || $1 == f || $6 ~ f')
+    'BEGIN { f = tolower(f) } index(tolower($7), f) || $1 == f || index($6, f)')
   [ "$limit" -gt 0 ] && rows=$(printf '%s\n' "$rows" | head -n "$limit")
   [ -z "${rows//[[:space:]]/}" ] && return 0
   mapfile -t VIEW_ROWS < <(printf '%s\n' "$rows" | dash_fmt_proc)
@@ -1062,8 +1069,13 @@ dash_hdr_projects() { printf '%5s %9s %8s  %-12s %s' PROCS RAM SWAP PORTS PROJEC
 # ---- painting -------------------------------------------------------------
 dash_line() { OUT+=("$1"); }
 
+# The format strings below are deliberately held in a variable: each row is
+# printed twice, once with colour and once plain, and the two must not drift
+# apart or the width budget is wrong. They are literals in this file, never
+# anything a user supplies.
+# shellcheck disable=SC2059
 dash_header() {
-  local sp bw pulse a line paused="" used
+  local sp bw pulse a line plain paused="" used total blank12="            "
   sp=${SPIN[$(( FRAME / 2 % ${#SPIN[@]} ))]}
   ease EASE_RAM "$TGT_RAM"
   ease EASE_SWP "$TGT_SWP"
@@ -1076,39 +1088,47 @@ dash_header() {
     "$C_DIM" -1 "$UPSTR" "$DASH_INT" "$paused" "$C_0"
   OUT+=("$line")
 
+  # Every row here builds a plain twin of itself, so the sparkline can be given
+  # the columns that are actually left. Without that the line wraps, and
+  # dash_paint positions rows absolutely, so a wrap eats the row below it.
+  local fmt=' %sRAM%s %s %s%4d%%%s %8s of %-8s '
   _abar "$EASE_RAM" "$bw"; local rambar=$REPLY
-  _spark HIST_RAM 1000; local ramspk=$REPLY
   _humb $(( MEM_T - MEM_A )); used=$REPLY
-  _humb "$MEM_T"
-  printf -v line ' %sRAM%s %s %s%4d%%%s %8s of %-8s %s%s' \
-    "$C_B" "$C_0" "$rambar" "$C_B" $(( (EASE_RAM + 5) / 10 )) "$C_0" \
-    "$used" "$REPLY" "$ramspk" "$C_0"
-  OUT+=("$line")
+  _humb "$MEM_T"; total=$REPLY
+  printf -v line  "$fmt" "$C_B" "$C_0" "$rambar" "$C_B" $(( (EASE_RAM + 5) / 10 )) "$C_0" "$used" "$total"
+  printf -v plain "$fmt" "" "" "" "" $(( (EASE_RAM + 5) / 10 )) "" "$used" "$total"
+  _spark HIST_RAM 1000 $(( TCOLS - ${#plain} - bw ))
+  OUT+=("${line}${REPLY}${C_0}")
 
   if [ "$SW_T" -gt 0 ]; then
+    fmt=' %sSWP%s %s %s%4d%%%s %8s of %-8s '
     _abar "$EASE_SWP" "$bw"; local swpbar=$REPLY
-    _spark HIST_SWP 1000; local swpspk=$REPLY
     _humb $(( SW_T - SW_F )); used=$REPLY
-    _humb "$SW_T"
-    printf -v line ' %sSWP%s %s %s%4d%%%s %8s of %-8s %s%s' \
-      "$C_B" "$C_0" "$swpbar" "$C_B" $(( (EASE_SWP + 5) / 10 )) "$C_0" \
-      "$used" "$REPLY" "$swpspk" "$C_0"
-    OUT+=("$line")
+    _humb "$SW_T"; total=$REPLY
+    printf -v line  "$fmt" "$C_B" "$C_0" "$swpbar" "$C_B" $(( (EASE_SWP + 5) / 10 )) "$C_0" "$used" "$total"
+    printf -v plain "$fmt" "" "" "" "" $(( (EASE_SWP + 5) / 10 )) "" "$used" "$total"
+    _spark HIST_SWP 1000 $(( TCOLS - ${#plain} - bw ))
+    OUT+=("${line}${REPLY}${C_0}")
   fi
 
+  fmt=' %sCPU%s %s %s%4d%%%s %sload %s %s %s on %s cores%s '
   _abar "$EASE_CPU" "$bw"; local cpubar=$REPLY
-  _spark HIST_CPU 1000
-  printf -v line ' %sCPU%s %s %s%4d%%%s %sload %s %s %s on %s cores%s %s%s' \
-    "$C_B" "$C_0" "$cpubar" "$C_B" $(( (EASE_CPU + 5) / 10 )) "$C_0" \
-    "$C_DIM" "$L1" "$L5" "$L15" "$CORES" "$C_0" "$REPLY" "$C_0"
-  OUT+=("$line")
+  printf -v line  "$fmt" "$C_B" "$C_0" "$cpubar" "$C_B" $(( (EASE_CPU + 5) / 10 )) "$C_0" \
+    "$C_DIM" "$L1" "$L5" "$L15" "$CORES" "$C_0"
+  printf -v plain "$fmt" "" "" "" "" $(( (EASE_CPU + 5) / 10 )) "" "" "$L1" "$L5" "$L15" "$CORES" ""
+  _spark HIST_CPU 1000 $(( TCOLS - ${#plain} - bw ))
+  OUT+=("${line}${REPLY}${C_0}")
 
   if [ "$PSI_OK" = 1 ]; then
-    _spark HIST_PSI 1000
-    printf -v line ' %sSTL%s %s cpu %s mem %s io  %sstalled, last 10s%s %s%s' \
-      "$C_B" "$C_0" "$(psi_cell "$PSI_CPU")" "$(psi_cell "$PSI_MEM")" \
-      "$(psi_cell "$PSI_IO")" "$C_DIM" "$C_0" "$REPLY" "$C_0"
-    OUT+=("$line")
+    # three fixed 12-column cells; the label is the first thing to go
+    local lbl="stalled, last 10s"
+    [ "$TCOLS" -lt 100 ] && lbl=""
+    fmt=' %sSTL%s %s cpu %s mem %s io  %s%s%s '
+    printf -v line  "$fmt" "$C_B" "$C_0" "$(psi_cell "$PSI_CPU")" "$(psi_cell "$PSI_MEM")" \
+      "$(psi_cell "$PSI_IO")" "$C_DIM" "$lbl" "$C_0"
+    printf -v plain "$fmt" "" "" "$blank12" "$blank12" "$blank12" "" "$lbl" ""
+    _spark HIST_PSI 1000 $(( TCOLS - ${#plain} ))
+    OUT+=("${line}${REPLY}${C_0}")
   fi
 
   if [ "${#ALERTS[@]}" -gt 0 ]; then
@@ -1842,8 +1862,9 @@ ${C_B}DASHBOARD${C_0} ${C_DIM}(wslps dash)${C_0}
   ${C_C}x${C_0} stop the selection (asks first)   ${C_C}X${C_0} same with SIGKILL
   ${C_C}p${C_0} pause   ${C_C}+ -${C_0} refresh rate   ${C_C}?${C_0} help   ${C_C}q${C_0} quit
 
-  Bars, sparklines and colour turn themselves off when the output is not a
-  terminal, when NO_COLOR is set, or when WSLPS_ASCII is set.
+  Colour and block glyphs turn themselves off when the output is not a
+  terminal, when NO_COLOR is set, or when the locale is not UTF-8.
+  WSLPS_ASCII=1 keeps the colour and draws with # and . instead.
 
 ${C_B}GROUPS${C_0}
   $(group_legend)
