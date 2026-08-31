@@ -76,6 +76,30 @@ case "$psiout" in
 esac
 rm -rf "$psidir"
 
+group "project attribution reaches deep working directories"
+# a pnpm store or a monorepo package can sit a dozen levels under its own root;
+# a process started down there still belongs to the project
+proj=$(mktemp -d)
+deep="$proj/node_modules/.pnpm/x@1/node_modules/a/b/c/d/e/f/g/h"
+mkdir -p "$deep"
+echo '{}' > "$proj/package.json"
+( cd "$deep" && exec sleep 20 ) &
+deep_pid=$!
+sleep 1
+projout=$("$WSLPS" projects)
+case "$projout" in
+  *"$(basename "$proj")"*) pass "a process 12 levels down is attributed to its project" ;;
+  *)                       fail "a process 12 levels down is attributed to its project" ;;
+esac
+killout=$("$WSLPS" kill project "$(basename "$proj")" -d)
+case "$killout" in
+  *"$deep_pid"*) pass "kill project reaches it too" ;;
+  *)             fail "kill project reaches it too" ;;
+esac
+kill "$deep_pid" 2>/dev/null || true
+wait "$deep_pid" 2>/dev/null || true
+rm -rf "$proj"
+
 group "idle classification"
 # ppid 1 plus a hand-started group is an orphan; system daemons at ppid 1 are
 # not. Drive the predicate directly: a real orphan cannot be conjured here,
