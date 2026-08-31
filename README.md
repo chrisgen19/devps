@@ -83,7 +83,7 @@ ln -s "$PWD/wslps/wslps" ~/.local/bin/wslps
 | `wslps` | Full report: memory, ports, groups, top processes |
 | `wslps top [N]` | N biggest processes by RAM (default 15) |
 | `wslps swap [N]` | N biggest swap hogs (default 15) |
-| `wslps idle` | Long-running processes doing nothing |
+| `wslps idle` | Processes doing nothing, or left behind by a closed shell |
 | `wslps projects` | What each project costs, and the ports it owns |
 | `wslps doctor` | Whether this WSL box is configured to survive your work |
 | `wslps group <name>` | Every process in one group |
@@ -161,6 +161,9 @@ What it shows that the one-shot report cannot:
 - **real CPU per process** - the delta in `/proc/<pid>/stat` between two
   samples, not the lifetime average `ps` reports, so a process that was busy an
   hour ago no longer looks busy now
+- **disk IO per process** - `read_bytes` and `write_bytes` from
+  `/proc/<pid>/io`, so the `IO/s` column is real block IO rather than page-cache
+  hits. It answers the question the `io` pressure figure raises
 - **new processes** - a pid that appeared since the last sample is highlighted
 - **a colour per group** - `mcp` red, `ai-agent` orange, `dev-server` azure,
   `browser` blue, `editor` violet, `database` gold, `webserver` teal, `node`
@@ -172,7 +175,7 @@ What it shows that the one-shot report cannot:
 | --- | --- |
 | `1` `2` `3` `4` `5`, `tab` | Overview, processes, idle, ports, groups |
 | arrows or `j` `k`, `pgup` `pgdn` | Move the selection |
-| `s` | Sort by RAM, CPU, swap or uptime |
+| `s` | Sort by RAM, CPU, swap, disk IO or uptime |
 | `/` | Filter on command, pid or group (empty line clears it) |
 | `x` | Stop the selection - `X` for SIGKILL |
 | `t` | Process tree for the selection |
@@ -284,15 +287,28 @@ It walks **up** from the socket holder to the top of the server, so `kill port 3
 
 ### `wslps idle` is the "what did I forget about" view
 
-Lifetime CPU under 1%, alive over 20 minutes, over 20M resident:
+```
+IDLE - alive a while, doing nothing, or left behind (kill candidates)
+  idle: up > 20 min, CPU < 1% right now, RAM > 20M
+  orphan: its parent is gone, so nobody is watching it any more
+      PID      RAM     SWAP    CPU%   UPTIME  WHY         COMMAND
+    76147     2.2G        -    0.0%    2h04m  idle        next-server (v15.5.12)
+    30218     179M     334M    0.0%    5h21m  idle        chrome --type=renderer --crashpad-handler...
+    76121     164M        -    0.0%    2h04m  idle        node ~/projects/budget-tracker-2026/node_...
+    76337     157M        -    0.0%    2h04m  idle        node ~/projects/budget-tracker-2026/.next...
+    76084     150M        -    0.0%    2h04m  idle        pnpm dev
+```
 
-```
-      PID      RAM     SWAP    CPU%   UPTIME  COMMAND
-   171822    93.0M     2.2M    0.1%      44m  node ~/projects/budget-tracker/.next/pos...
-     4233    30.0M     298M    0.2%    5h05m  chrome-devtools-mcp
-    87286    21.3M    76.5M    0.1%    2h53m  npm exec chrome-devtools-mcp@latest ...
-  stopping all 8 would return 370M RAM and 510M swap
-```
+Two different questions, one list:
+
+- **idle** - alive over 20 minutes, over 20M resident, and using no CPU *right
+  now*. The CPU figure is a delta between two samples taken 300ms apart, not
+  the lifetime average `ps` reports, so a process that was busy an hour ago and
+  is quiet now is correctly listed
+- **orphan** - its parent is gone, which normally means you closed the terminal
+  it was started in and it kept running. Only groups you start by hand are
+  considered: plenty of system daemons sit at ppid 1 by design and are not
+  abandoned at all
 
 ### `wslps swap` shows who is actually paged out
 
@@ -348,7 +364,9 @@ Kernel threads are excluded.
 - **`kill group` is broad by design.** `kill group ai-agent` can target fifty-plus processes. Preview with `-d`.
 - **`-9` skips cleanup.** Next dev servers flush caches on SIGTERM. Try the polite signal first; `wslps` only suggests `-9` if something ignored it.
 - **Ports owned by other users show `-` for pid.** Run `sudo wslps ports` to see them.
-- **`idle` is a heuristic.** It uses lifetime average CPU, so a process that was busy an hour ago and is idle now may not appear. The dashboard's `CPU%` column does not have this problem: it is a real delta between samples.
+- **`idle` costs 300ms.** It takes two snapshots to get a real CPU number, so it is slower than the other one-shot commands by exactly that gap.
+- **Orphan detection looks for ppid 1.** Under a process supervisor or an agent that makes itself a subreaper, an abandoned process is reparented to that instead of to init, and will not be flagged.
+- **`IO/s` only covers your own processes.** `/proc/<pid>/io` needs ptrace access; other users' processes report `-`. The read is skipped entirely for commands that do not show the column.
 - **`projects` can only see your own processes.** A working directory is readable for processes you own; anything else lands in the `(cwd not readable)` bucket rather than being guessed at.
 - **`doctor` needs Windows interop** for host RAM and the VHDX location. Without it those rows read `unknown` and the rest of the checks still run.
 - **PSI needs a kernel built with `CONFIG_PSI`.** Every current WSL2 kernel has it. Without it, wslps falls back to load average and the D-state count.
