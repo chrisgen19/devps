@@ -282,13 +282,30 @@ bar() {
 
 hum_kb() { awk "$AWKLIB"' BEGIN { print hum(ARGV[1]) }' "$1"; }
 
-# snapshot -> TSV: pid rss_kb swap_kb etimes pcpu group args cputicks  (rss desc)
+# snapshot -> TSV, rss desc:
+#   1 pid  2 rss_kb  3 swap_kb  4 etimes  5 pcpu  6 group  7 args
+#   8 cputicks  9 ppid  10 io_bytes
+# Columns 8-10 are counters, not rates: a caller that wants a rate takes two
+# snapshots and divides by the time between them.
+WS_IO=0        # reading /proc/<pid>/io for every process is a third of the
+               # snapshot's cost, so only the callers that show it opt in
 snapshot() {
-  ps -eo pid=,rss=,etimes=,pcpu=,args= --sort=-rss | awk '
+  ps -eo pid=,ppid=,rss=,etimes=,pcpu=,args= --sort=-rss | awk -v wantio="$WS_IO" '
   function swapkb(pid,   f, line, p, v) {
     f = "/proc/" pid "/status"; v = 0
     while ((getline line < f) > 0)
       if (line ~ /^VmSwap:/) { split(line, p, /[ \t]+/); v = p[2] + 0; break }
+    close(f)
+    return v
+  }
+  function iobytes(pid,   f, line, p, v) {
+    # real block IO, not rchar/wchar: those count page-cache hits too, and the
+    # question this answers is who is actually reaching the disk. Readable only
+    # for your own processes; anything else reports 0.
+    if (!wantio) return 0
+    f = "/proc/" pid "/io"; v = 0
+    while ((getline line < f) > 0)
+      if (line ~ /^(read_bytes|write_bytes):/) { split(line, p, /[ \t]+/); v += p[2] + 0 }
     close(f)
     return v
   }
@@ -316,12 +333,12 @@ snapshot() {
     return "other"
   }
   {
-    pid = $1; rss = $2 + 0; et = $3 + 0; pc = $4 + 0
+    pid = $1; ppid = $2; rss = $3 + 0; et = $4 + 0; pc = $5 + 0
     args = ""
-    for (i = 5; i <= NF; i++) args = args (i > 5 ? " " : "") $i
+    for (i = 6; i <= NF; i++) args = args (i > 6 ? " " : "") $i
     if (args ~ /^\[/) next
-    printf "%s\t%d\t%d\t%d\t%s\t%s\t%s\t%d\n", pid, rss, swapkb(pid), et, pc,
-           cat(args), args, ticks(pid)
+    printf "%s\t%d\t%d\t%d\t%s\t%s\t%s\t%d\t%s\t%d\n", pid, rss, swapkb(pid), et, pc,
+           cat(args), args, ticks(pid), ppid, iobytes(pid)
   }'
 }
 
@@ -686,15 +703,57 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
 }
 
 # ------------------------------------------------------------------ views ----
+# Two snapshots <gap> apart, the second annotated the way the dashboard
+# annotates its own: 11 instant cpu%, 12 is-new (always 0 here), 13 io bytes/s.
+# ps reports a lifetime average, which says a process that was busy an hour ago
+# is busy now. Two samples say what is happening at this moment.
+snapshot_rate() {
+  local gap=${1:-0.3} f us1 dt hz
+  hz=$(getconf CLK_TCK) || hz=100
+  f=$(mktemp -t wslps.XXXXXX) || die "cannot create a temp file"
+  us1=${EPOCHREALTIME/[.,]/}
+  snapshot | awk -F'\t' '{ print $1 "\t" $8 "\t" $10 }' > "$f"
+  sleep "$gap"
+  dt=$(( ${EPOCHREALTIME/[.,]/} - us1 ))
+  snapshot | awk -F'\t' -v dt="$dt" -v hz="$hz" -v pf="$f" '
+    FILENAME == pf { pv[$1] = $2; pb[$1] = $3; next }
+    { c = 0; io = 0
+      if (dt > 0 && ($1 in pv)) {
+        c  = ($8 - pv[$1]) * 1000000 * 100 / (hz * dt)
+        io = ($10 - pb[$1]) * 1000000 / dt
+      }
+      if (c < 0) c = 0
+      if (c > 999) c = 999
+      if (io < 0) io = 0
+      printf "%s\t%.1f\t0\t%d\n", $0, c, io }' "$f" -
+  rm -f "$f"
+}
+
 idle_cmd() {
-  printf '%sIDLE - alive a while, barely using CPU (kill candidates)%s\n' "$C_B" "$C_0"
-  printf '  %sheuristic: up > 20 min, lifetime CPU < 1%%, RAM > 20M%s\n' "$C_DIM" "$C_0"
+  printf '%sIDLE - alive a while, doing nothing, or left behind (kill candidates)%s\n' "$C_B" "$C_0"
+  printf '  %sidle: up > 20 min, CPU < 1%% right now, RAM > 20M%s\n' "$C_DIM" "$C_0"
+  printf '  %sorphan: its parent is gone, so nobody is watching it any more%s\n' "$C_DIM" "$C_0"
   local rows
-  rows=$(snapshot | awk -F'\t' '$4 > 1200 && $5 < 1.0 && $2 > 20000 && $6 ~ /^(dev-server|mcp|browser|node|webserver)$/')
-  if [ -z "$rows" ]; then printf '  %s(nothing obviously idle)%s\n\n' "$C_DIM" "$C_0"; return; fi
-  printf '%s\n' "$rows" | awk -F'\t' -v CD="$C_DIM" -v C0="$C_0" "$AWKLIB"'
-    BEGIN { printf "  %7s %8s %8s %7s %8s  %s\n", "PID","RAM","SWAP","CPU%","UPTIME","COMMAND" }
-    { printf "  %7s %8s %8s %6.1f%% %8s  %s\n", $1, hum($2), ($3>0?hum($3):"-"), $5, dur($4), shorten($7, 48)
+  WS_IO=0
+  rows=$(snapshot_rate 0.3 | awk -F'\t' -v OFS='\t' '
+    { dev = ($6 ~ /^(dev-server|mcp|browser|node|webserver)$/)
+      # ppid 1 means the shell that started it has gone. Restricted to the
+      # groups you start by hand: plenty of system daemons live at ppid 1 by
+      # design and are not "left behind" at all.
+      orphan = ($9 == 1 && $2 > 20000 && (dev || $6 == "ai-agent"))
+      idle   = (dev && $4 > 1200 && $11 < 1.0 && $2 > 20000)
+      if (!orphan && !idle) next
+      print $0, (orphan && idle) ? "idle+orphan" : (orphan ? "orphan" : "idle") }' \
+    | sort -t$'\t' -k2,2nr)
+  if [ -z "${rows//[[:space:]]/}" ]; then
+    printf '  %s(nothing obviously idle or orphaned)%s\n\n' "$C_DIM" "$C_0"; return
+  fi
+  printf '%s\n' "$rows" | awk -F'\t' -v CD="$C_DIM" -v C0="$C_0" -v CY="$C_Y" -v CR="$C_R" \
+    "$AWKLIB"'
+    BEGIN { printf "  %7s %8s %8s %7s %8s  %-11s %s\n",
+                   "PID","RAM","SWAP","CPU%","UPTIME","WHY","COMMAND" }
+    { printf "  %7s %8s %8s %6.1f%% %8s  %s%-11s%s %s\n", $1, hum($2), ($3 > 0 ? hum($3) : "-"),
+             $11, dur($4), ($14 ~ /orphan/ ? CR : CY), $14, C0, shorten($7, 44)
       r += $2; s += $3; n++ }
     END { printf "  %sstopping all %d would return %s RAM and %s swap%s\n", CD, n, hum(r), hum(s), C0 }'
   echo
@@ -822,6 +881,7 @@ dash_sample() {
   us=${EPOCHREALTIME/[.,]/}; dt=$(( us - LAST_US )); [ "$LAST_US" -eq 0 ] && dt=0
   LAST_US=$us; SAMPLE_US=$us
 
+  WS_IO=1
   read_mem; read_cpu
   UPSTR=$(uptime_h)
   read -r L1 L5 L15 _ < /proc/loadavg
@@ -858,14 +918,17 @@ dash_sample() {
   # match on FILENAME, not NR == FNR: on the very first sample the previous
   # file is empty, and the NR == FNR idiom then swallows every row of stdin
   SNAP_ROWS=$(printf '%s\n' "$SNAP" | awk -F'\t' -v dt="$dt" -v hz="$CLK_TCK" -v pf="$PREVF" '
-    FILENAME == pf { prev[$1] = $2; seen = 1; next }
-    { c = 0; isnew = 0
-      if (dt > 0 && ($1 in prev))    c = ($8 - prev[$1]) * 1000000 * 100 / (hz * dt)
-      else if (dt > 0 && seen)       isnew = 1
+    FILENAME == pf { prev[$1] = $2; prevby[$1] = $3; seen = 1; next }
+    { c = 0; isnew = 0; io = 0
+      if (dt > 0 && ($1 in prev)) {
+        c  = ($8 - prev[$1]) * 1000000 * 100 / (hz * dt)
+        io = ($10 - prevby[$1]) * 1000000 / dt
+      } else if (dt > 0 && seen) isnew = 1
       if (c < 0) c = 0
       if (c > 999) c = 999
-      printf "%s\t%.1f\t%d\n", $0, c, isnew }' "$PREVF" -)
-  printf '%s\n' "$SNAP" | awk -F'\t' '{ print $1 "\t" $8 }' > "$PREVF"
+      if (io < 0) io = 0
+      printf "%s\t%.1f\t%d\t%d\n", $0, c, isnew, io }' "$PREVF" -)
+  printf '%s\n' "$SNAP" | awk -F'\t' '{ print $1 "\t" $8 "\t" $10 }' > "$PREVF"
   DIRTY=1
   dash_build
 }
@@ -904,7 +967,7 @@ dash_build() {
 
 dash_sortkey() {
   case "$DASH_SORT" in
-    cpu) printf '9' ;; swap) printf '3' ;; uptime) printf '4' ;; *) printf '2' ;;
+    cpu) printf '11' ;; swap) printf '3' ;; io) printf '13' ;; uptime) printf '4' ;; *) printf '2' ;;
   esac
 }
 
@@ -948,24 +1011,28 @@ dash_fmt_proc() {
     return s
   }
   BEGIN { split(BLKS, blk, ",")
-          wide = (W >= 104)
-          cmdw = W - (wide ? 78 : 54); if (cmdw < 12) cmdw = 12 }
+          wide = (W >= 108)
+          cmdw = W - (wide ? 82 : 54); if (cmdw < 12) cmdw = 12 }
   { rows[NR] = $0
     if ($2 + 0 > mx) mx = $2 + 0
-    if ($9 + 0 > mxc) mxc = $9 + 0 }
+    if ($11 + 0 > mxc) mxc = $11 + 0
+    if ($13 + 0 > mxio) mxio = $13 + 0 }
   END {
     for (i = 1; i <= NR; i++) {
       split(rows[i], f, "\t")
-      cpu = f[9] + 0
+      cpu = f[11] + 0
       cc  = (cpu >= 60) ? CR : (cpu >= 15) ? CY : CD
       rc  = (f[2] + 0 > mx * 0.5) ? CR : (f[2] + 0 > mx * 0.2) ? CY : CG
-      pc  = (f[10] == 1) ? CN : CD
+      pc  = (f[12] == 1) ? CN : CD
       sw  = (f[3] + 0 > 0) ? hum(f[3]) : "-"
       swc = (f[3] + 0 > 0) ? CY : CD
+      io  = f[13] + 0
+      ioc = (io > 1048576) ? CR : (io > 0) ? CY : CD
       if (wide)
-        printf "%s%7s%s %s%8s%s %s%s%s %s%7s%s %s%5.1f%%%s %s%s%s %s%8s%s %s%-10s%s %s\n",
+        printf "%s%7s%s %s%8s%s %s%s%s %s%7s%s %s%5.1f%%%s %s%8s%s %s%8s%s %s%-10s%s %s\n",
           pc, f[1], C0, rc, hum(f[2]), C0, rc, micro(f[2], mx, 8), C0,
-          swc, sw, C0, cc, cpu, C0, cc, micro(cpu, mxc, 5), C0,
+          swc, sw, C0, cc, cpu, C0,
+          ioc, (io > 0 ? hum(io / 1024) "/s" : "-"), C0,
           CD, dur(f[4]), C0, gcol(f[6]), f[6], C0, shorten(f[7], cmdw)
       else
         printf "%s%7s%s %s%8s%s %s%7s%s %s%5.1f%%%s %s%8s%s %s\n",
@@ -976,8 +1043,8 @@ dash_fmt_proc() {
 }
 
 dash_hdr_proc() {
-  if [ "$TCOLS" -ge 104 ]; then
-    printf '%7s %8s %8s %7s %6s %5s %8s %-10s %s' PID RAM "" SWAP "CPU%" "" UPTIME GROUP COMMAND
+  if [ "$TCOLS" -ge 108 ]; then
+    printf '%7s %8s %8s %7s %6s %8s %8s %-10s %s' PID RAM "" SWAP "CPU%" "IO/s" UPTIME GROUP COMMAND
   else
     printf '%7s %8s %7s %6s %8s %s' PID RAM SWAP "CPU%" UPTIME COMMAND
   fi
@@ -996,7 +1063,7 @@ dash_port_raw() {
 dash_port_fmt() {
   printf '%s\n%s\n' "$SNAP_ROWS" "$1" | awk -F'\t' \
     -v CD="$C_DIM" -v C0="$C_0" -v CG="$C_G" -v CY="$C_Y" -v W="$TCOLS" "$AWKLIB"'
-    NF > 3 { rss[$1] = $2; args[$1] = $7; cpu[$1] = $9 + 0; next }
+    NF > 3 { rss[$1] = $2; args[$1] = $7; cpu[$1] = $11 + 0; next }
     { pid = $2
       cmd = (pid in args) ? shorten(args[pid], W - 42) \
           : (pid == "" ? "(another user - run: sudo wslps ports)" : "(exited)")
@@ -1020,9 +1087,9 @@ dash_hdr_ports() { printf '%7s %8s %8s %6s  %s' PORT PID RAM "CPU%" PROCESS; }
 
 dash_group_lines() {
   printf '%s\n' "$SNAP_ROWS" | awk -F'\t' -v ORDER="$WS_GROUPS" \
-    -v CD="$C_DIM" -v C0="$C_0" -v CG="$C_G" -v CY="$C_Y" -v GCOLS="$GCOLS_STR" \
+    -v CD="$C_DIM" -v C0="$C_0" -v CG="$C_G" -v CY="$C_Y" -v CR="$C_R" -v GCOLS="$GCOLS_STR" \
     -v BLKS="$(IFS=,; printf '%s' "${BLK[*]}")" -v EMPTY="$BAR_EMPTY" "$AWKLIB"'
-    { n[$6]++; r[$6] += $2; s[$6] += $3; c[$6] += $9; tr += $2; tn++ }
+    { n[$6]++; r[$6] += $2; s[$6] += $3; c[$6] += $11; io[$6] += $13; tr += $2; tn++ }
     END {
       split(BLKS, blk, ",")
       ng = split(ORDER, o, " ")
@@ -1036,9 +1103,11 @@ dash_group_lines() {
         w = (tr > 0) ? int(r[g] * 24 / tr + 0.5) : 0
         b = ""
         for (k = 0; k < 24; k++) b = b (k < w ? blk[8] : EMPTY)
-        printf "%s%-12s%s %s%5d%s %s%9s%s %s%8s%s %s%5.1f%%%s  %s%s%s\n",
+        printf "%s%-12s%s %s%5d%s %s%9s%s %s%8s%s %s%5.1f%%%s %s%8s%s  %s%s%s\n",
           gcol(g), g, C0, CD, n[g], C0, CG, hum(r[g]), C0,
-          CY, (s[g] > 0 ? hum(s[g]) : "-"), C0, CD, c[g], C0, CG, b, C0
+          CY, (s[g] > 0 ? hum(s[g]) : "-"), C0, CD, c[g], C0,
+          (io[g] > 1048576 ? CR : CD), (io[g] > 0 ? hum(io[g] / 1024) "/s" : "-"), C0,
+          CG, b, C0
       }
     }'
 }
@@ -1048,7 +1117,7 @@ dash_rows_groups() {
   return 0
 }
 
-dash_hdr_groups() { printf '%-12s %5s %9s %8s %6s  %s' GROUP COUNT RAM SWAP "CPU%" SHARE; }
+dash_hdr_groups() { printf '%-12s %5s %9s %8s %6s %8s  %s' GROUP COUNT RAM SWAP "CPU%" "IO/s" SHARE; }
 
 dash_rows_projects() {
   local rows
@@ -1145,19 +1214,34 @@ dash_header() {
 }
 
 dash_footer() {
-  local keys
-  case "$DASH_VIEW" in
-    overview|procs|idle)
-      keys="${C_ACC}up/dn${C_0} move  ${C_ACC}x${C_0} kill  ${C_ACC}t${C_0} tree  ${C_ACC}s${C_0} sort:${DASH_SORT}  ${C_ACC}/${C_0} filter" ;;
-    ports)
-      keys="${C_ACC}up/dn${C_0} move  ${C_ACC}x${C_0} kill port  ${C_ACC}t${C_0} tree" ;;
-    projects)
-      keys="${C_ACC}up/dn${C_0} move  ${C_ACC}x${C_0} kill project" ;;
-    *)
-      keys="${C_ACC}tab${C_0} next view" ;;
-  esac
+  local keys tail
+  # the hint line is the one row with no data in it, so it is the row that
+  # gives way first: below 100 columns it keeps only the keys you cannot guess
+  if [ "$TCOLS" -ge 100 ]; then
+    case "$DASH_VIEW" in
+      overview|procs|idle)
+        keys="${C_ACC}up/dn${C_0} move  ${C_ACC}x${C_0} kill  ${C_ACC}t${C_0} tree  ${C_ACC}s${C_0} sort:${DASH_SORT}  ${C_ACC}/${C_0} filter" ;;
+      ports)
+        keys="${C_ACC}up/dn${C_0} move  ${C_ACC}x${C_0} kill port  ${C_ACC}t${C_0} tree" ;;
+      projects)
+        keys="${C_ACC}up/dn${C_0} move  ${C_ACC}x${C_0} kill project" ;;
+      *)
+        keys="${C_ACC}tab${C_0} next view" ;;
+    esac
+    tail="  ${C_ACC}1-6${C_0} views  ${C_ACC}+ -${C_0} rate  ${C_ACC}p${C_0} pause  ${C_ACC}?${C_0} help  ${C_ACC}q${C_0} quit"
+  else
+    case "$DASH_VIEW" in
+      overview|procs|idle)
+        keys="${C_ACC}x${C_0} kill  ${C_ACC}t${C_0} tree  ${C_ACC}s${C_0} ${DASH_SORT}  ${C_ACC}/${C_0} filter" ;;
+      ports|projects)
+        keys="${C_ACC}x${C_0} kill" ;;
+      *)
+        keys="${C_ACC}tab${C_0} view" ;;
+    esac
+    tail="  ${C_ACC}1-6${C_0} views  ${C_ACC}?${C_0} help  ${C_ACC}q${C_0} quit"
+  fi
   OUT+=("")
-  OUT+=(" ${C_DIM}${keys}  ${C_ACC}1-6${C_0} views  ${C_ACC}+ -${C_0} rate  ${C_ACC}p${C_0} pause  ${C_ACC}?${C_0} help  ${C_ACC}q${C_0} quit${C_0}")
+  OUT+=(" ${C_DIM}${keys}${tail}${C_0}")
   [ -n "$DASH_MSG" ] && OUT+=(" $DASH_MSG")
   return 0
 }
@@ -1166,7 +1250,7 @@ dash_help_panel() {
   OUT+=(" ${C_B}KEYS${C_0}")
   OUT+=("   ${C_ACC}1${C_0} overview  ${C_ACC}2${C_0} processes  ${C_ACC}3${C_0} idle  ${C_ACC}4${C_0} ports  ${C_ACC}5${C_0} groups  ${C_ACC}6${C_0} projects  ${C_ACC}tab${C_0} cycle")
   OUT+=("   ${C_ACC}up down / j k${C_0}  move the selection    ${C_ACC}pgup pgdn${C_0}  page")
-  OUT+=("   ${C_ACC}s${C_0}   sort by rss, cpu, swap, uptime")
+  OUT+=("   ${C_ACC}s${C_0}   sort by rss, cpu, swap, io, uptime")
   OUT+=("   ${C_ACC}/${C_0}   filter on command, pid or group (empty line clears it)")
   OUT+=("   ${C_ACC}x${C_0}   stop the selected process - full preview, then it asks")
   OUT+=("   ${C_ACC}X${C_0}   the same, with SIGKILL")
@@ -1369,7 +1453,8 @@ dash_keys() {
     s)       case "$DASH_SORT" in
                rss)  DASH_SORT=cpu ;;
                cpu)  DASH_SORT=swap ;;
-               swap) DASH_SORT=uptime ;;
+               swap) DASH_SORT=io ;;
+               io)   DASH_SORT=uptime ;;
                *)    DASH_SORT=rss ;;
              esac; dash_build ;;
     p)       DASH_PAUSED=$(( 1 - DASH_PAUSED )) ;;
@@ -1833,7 +1918,7 @@ ${C_B}LOOKING${C_0}
   ${C_C}wslps${C_0}                     full report: memory, ports, groups, top processes
   ${C_C}wslps top${C_0} [N]              N biggest processes by RAM        (default 15)
   ${C_C}wslps swap${C_0} [N]             N biggest swap hogs               (default 15)
-  ${C_C}wslps idle${C_0}                 long-running processes doing nothing
+  ${C_C}wslps idle${C_0}                 processes doing nothing, or left behind by a closed shell
   ${C_C}wslps projects${C_0}             what each project costs, and the ports it owns
   ${C_C}wslps doctor${C_0}               is this WSL box configured to survive your work
   ${C_C}wslps group${C_0} <name>         every process in one group
@@ -1875,7 +1960,7 @@ ${C_B}EXAMPLES${C_0}
   wslps projects              which checkout is costing you, not which process
   wslps doctor                why the box died at 3am (memory cap, disk, 9P)
   wslps swap                  who is paged out - the real cause of slowness
-  wslps idle                  the dev servers you forgot about
+  wslps idle                  the dev servers you forgot about, and the orphans
   wslps port 3111             which project is this, and where does it live
   wslps kill port 3000        stop that Next dev server cleanly
   wslps kill group mcp -d     preview reaping every stray MCP process

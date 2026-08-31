@@ -76,6 +76,32 @@ case "$psiout" in
 esac
 rm -rf "$psidir"
 
+group "idle classification"
+# ppid 1 plus a hand-started group is an orphan; system daemons at ppid 1 are
+# not. Drive the predicate directly: a real orphan cannot be conjured here,
+# because anything this script starts is reparented to its own supervisor.
+idle_awk() {
+  awk -F'\t' -v OFS='\t' '
+    { dev = ($6 ~ /^(dev-server|mcp|browser|node|webserver)$/)
+      orphan = ($9 == 1 && $2 > 20000 && (dev || $6 == "ai-agent"))
+      idle   = (dev && $4 > 1200 && $11 < 1.0 && $2 > 20000)
+      if (!orphan && !idle) next
+      print $1, (orphan && idle) ? "idle+orphan" : (orphan ? "orphan" : "idle") }'
+}
+verdict() { printf '%s\n' "$2" | idle_awk | awk -v w="$1" '$2 == w { f = 1 } END { exit !f }'; }
+busy_orphan=$(printf 'p1\t50000\t0\t100\t0.0\tnode\tnode server.js\t10\t1\t0\t42.0\t0\t0')
+idle_child=$(printf 'p2\t50000\t0\t9999\t0.0\tdev-server\tnext dev\t10\t4242\t0\t0.0\t0\t0')
+daemon=$(printf 'p3\t50000\t0\t9999\t0.0\tdatabase\tpostgres\t10\t1\t0\t0.0\t0\t0')
+if verdict orphan "$busy_orphan"; then pass "a busy process with no parent is an orphan"
+else fail "a busy process with no parent is an orphan"; fi
+if verdict idle "$idle_child"; then pass "an idle process with a parent is idle, not orphaned"
+else fail "an idle process with a parent is idle, not orphaned"; fi
+if verdict "" "$daemon" || [ -z "$(printf '%s\n' "$daemon" | idle_awk)" ]; then
+  pass "a system daemon at ppid 1 is not an orphan"
+else
+  fail "a system daemon at ppid 1 is not an orphan"
+fi
+
 group "the dashboard degrades without a terminal"
 # no tty here, so dash must fall back to the plain repeating report and print
 # something rather than sitting on a keyboard that will never arrive
