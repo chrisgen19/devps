@@ -130,10 +130,15 @@ abar() { _abar "$@"; printf '%s' "$REPLY"; }
 # like a pegged 100%, which is a lie a resource monitor cannot afford.
 _spark() {
   local -n vals=$1
-  local out="" v mx=${2:-0} idx col last=""
+  local out="" v mx=${2:-0} budget=${3:-32} n=${#vals[@]} idx col last=""
+  # the slice below is a negative offset: asking for more than the array holds
+  # is an expansion error, not a short read
+  [ "$budget" -gt "$n" ] && budget=$n
+  if [ "$budget" -lt 1 ]; then REPLY=""; return 0; fi
   [ "$mx" -gt 0 ] || for v in "${vals[@]}"; do [ "$v" -gt "$mx" ] && mx=$v; done
   [ "$mx" -gt 0 ] || mx=1
-  for v in "${vals[@]}"; do
+  # keep the newest samples: a truncated sparkline should lose its left edge
+  for v in "${vals[@]: -budget}"; do
     idx=$(( v * 7 / mx )); [ "$idx" -lt 0 ] && idx=0
     if [ "$UI_COLOR" -ge 2 ]; then
       case $(( v * 100 / (mx > 0 ? mx : 1) )) in
@@ -202,6 +207,63 @@ group_legend() {
   local g out=""
   for g in $WS_GROUPS; do out+="${GCOL[$g]:-}${g}${C_0} "; done
   printf '%s' "$out"
+}
+
+# ------------------------------------------------------------------- psi ----
+# Pressure Stall Information: the share of the last 10s in which tasks were
+# stalled waiting for a resource. "some" means at least one task was blocked,
+# "full" means every non-idle task was - which is the kernel's own definition
+# of thrashing. Load average cannot tell CPU contention from IO stall because
+# it counts uninterruptible tasks too, so PSI is what the warnings below use
+# whenever the kernel provides it. Values are kept as hundredths of a percent.
+PSI_OK=0
+PSI_ALERTS=()
+PSI_CPU=0; PSI_MEM=0; PSI_MEM_FULL=0; PSI_IO=0; PSI_IO_FULL=0
+
+# WSLPS_PSI_DIR points the reader at fixtures, so the thresholds below are
+# testable without having to thrash a real machine to reach them
+psi_read() {
+  local d=${WSLPS_PSI_DIR:-/proc/pressure} out
+  [ -r "$d/cpu" ] || { PSI_OK=0; return 1; }
+  out=$(awk '
+    function pct(s,   v) { sub(/^.*avg10=/, "", s); sub(/ .*$/, "", s); return int(v = s * 100 + 0.5) }
+    FILENAME ~ /cpu$/    && /^some/ { c = pct($0) }
+    FILENAME ~ /memory$/ && /^some/ { m = pct($0) }
+    FILENAME ~ /memory$/ && /^full/ { mf = pct($0) }
+    FILENAME ~ /io$/     && /^some/ { i = pct($0) }
+    FILENAME ~ /io$/     && /^full/ { iff = pct($0) }
+    END { printf "%d %d %d %d %d", c, m, mf, i, iff }
+  ' "$d/cpu" "$d/memory" "$d/io") || return 1
+  read -r PSI_CPU PSI_MEM PSI_MEM_FULL PSI_IO PSI_IO_FULL <<< "$out"
+  PSI_OK=1
+}
+
+# The warning thresholds, in one place. Memory "full" at 10% of the last ten
+# seconds means the box spent one second of it with every task stalled.
+psi_alerts() {
+  PSI_ALERTS=()
+  [ "$PSI_OK" = 1 ] || return 0
+  [ "$PSI_MEM_FULL" -ge 1000 ] &&
+    PSI_ALERTS+=("crit|! memory thrashing - every task stalled $(pctstr "$PSI_MEM_FULL") of the last 10s")
+  [ "$PSI_MEM_FULL" -lt 1000 ] && [ "$PSI_MEM" -ge 2000 ] &&
+    PSI_ALERTS+=("warn|! memory pressure $(pctstr "$PSI_MEM") - something is waiting on RAM")
+  [ "$PSI_IO_FULL" -ge 1000 ] &&
+    PSI_ALERTS+=("crit|! disk stalled $(pctstr "$PSI_IO_FULL") of the last 10s - paging or heavy IO")
+  [ "$PSI_IO_FULL" -lt 1000 ] && [ "$PSI_IO" -ge 3000 ] &&
+    PSI_ALERTS+=("warn|! disk pressure $(pctstr "$PSI_IO") - IO is the bottleneck, not CPU")
+  [ "$PSI_CPU" -ge 5000 ] &&
+    PSI_ALERTS+=("warn|! CPU contention $(pctstr "$PSI_CPU") - tasks are queueing for a core")
+  return 0
+}
+
+pctstr() { printf '%d.%d%%' $(( $1 / 100 )) $(( $1 % 100 / 10 )); }
+
+# one pressure figure as a short bar plus its percentage
+psi_cell() {
+  local h=$1 col=$C_G
+  [ "$h" -ge 1000 ] && col=$C_Y
+  [ "$h" -ge 3000 ] && col=$C_R
+  printf '%s %s%5s%s' "$(abar $(( h / 10 )) 6)" "$col" "$(pctstr "$h")" "$C_0"
 }
 
 # ---------------------------------------------------------------- helpers ----
@@ -292,7 +354,23 @@ header() {
   printf '  %-6s %s   %s / %s / %s  %sacross %s cores%s\n' "LOAD" \
     "$(bar "$l1" "$cores")" "$l1" "$l5" "$l15" "$C_DIM" "$cores" "$C_0"
 
+  psi_read || true
+  if [ "$PSI_OK" = 1 ]; then
+    printf '  %-6s %s cpu   %s mem   %s io   %s(stalled, last 10s)%s\n' "STALL" \
+      "$(psi_cell "$PSI_CPU")" "$(psi_cell "$PSI_MEM")" "$(psi_cell "$PSI_IO")" \
+      "$C_DIM" "$C_0"
+  fi
+
   echo
+  local a
+  psi_alerts
+  for a in ${PSI_ALERTS[@]+"${PSI_ALERTS[@]}"}; do
+    case "$a" in
+      crit\|*) printf '  %s%s%s\n' "$C_R" "${a#*|}" "$C_0" ;;
+      *)       printf '  %s%s%s\n' "$C_Y" "${a#*|}" "$C_0" ;;
+    esac
+    warned=1
+  done
   if [ "$st" -gt 0 ] && [ $(( su * 100 / st )) -ge 80 ]; then
     printf '  %s! swap is %d%% full - the box is paging heavily%s\n' "$C_R" \
       $(( su * 100 / st )) "$C_0"; warned=1
@@ -301,13 +379,17 @@ header() {
     printf '  %s! only %s available RAM (%d%%) - close something%s\n' "$C_R" \
       "$(hum_kb "$ma")" $(( ma * 100 / mt )) "$C_0"; warned=1
   fi
-  if awk -v l="$l1" -v c="$cores" 'BEGIN{exit !(l > c * 1.5)}'; then
-    printf '  %s! load %s on %s cores - CPU saturated%s\n' "$C_Y" "$l1" "$cores" "$C_0"
-    warned=1
-  fi
-  if [ "$dstate" -gt 0 ]; then
-    printf '  %s! %d process(es) in D state (blocked on disk / page-in)%s\n' "$C_Y" \
-      "$dstate" "$C_0"; warned=1
+  # load average and the D-state count are proxies for pressure; only fall back
+  # to them on a kernel without PSI, where they are all there is
+  if [ "$PSI_OK" != 1 ]; then
+    if awk -v l="$l1" -v c="$cores" 'BEGIN{exit !(l > c * 1.5)}'; then
+      printf '  %s! load %s on %s cores - CPU saturated%s\n' "$C_Y" "$l1" "$cores" "$C_0"
+      warned=1
+    fi
+    if [ "$dstate" -gt 0 ]; then
+      printf '  %s! %d process(es) in D state (blocked on disk / page-in)%s\n' "$C_Y" \
+        "$dstate" "$C_0"; warned=1
+    fi
   fi
   if [ "$warned" = 1 ]; then
     printf '  %stry: wslps idle    then: wslps kill port <n>%s\n' "$C_DIM" "$C_0"
@@ -467,15 +549,17 @@ kill_cmd() {
       -y|--yes)     assume_yes=1 ;;
       -9|--force)   sig=KILL ;;
       -d|--dry-run) dry=1 ;;
-      port|pid|group)
+      port|pid|group|project)
         if [ -z "$kind" ]; then kind="$a"; else target="$a"; fi ;;
       *)
-        if [ -z "$kind" ]; then die "kill needs: port <n> | pid <n> | group <name>"; fi
+        if [ -z "$kind" ]; then
+          die "kill needs: port <n> | pid <n> | group <name> | project <name>"
+        fi
         target="$a" ;;
     esac
   done
   if [ -z "$kind" ] || [ -z "$target" ]; then
-    die "usage: wslps kill port <n> | pid <n> | group <name>   [-y] [-9] [-d]"
+    die "usage: wslps kill port <n> | pid <n> | group <name> | project <name>   [-y] [-9] [-d]"
   fi
 
   build_protected
@@ -502,6 +586,17 @@ kill_cmd() {
       valid_group "$target" || die "unknown group '$target' (valid: $WS_GROUPS)"
       mapfile -t roots < <(snapshot | awk -F'\t' -v g="$target" '$6 == g { print $1 }')
       [ "${#roots[@]}" -gt 0 ] || die "no processes in group '$target'"
+      ;;
+    project)
+      local hits distinct
+      hits=$(project_pids "$target")
+      [ -n "${hits//[[:space:]]/}" ] || die "no processes for project '$target' (try: wslps projects)"
+      distinct=$(printf '%s\n' "$hits" | cut -f1 | sort -u)
+      if [ "$(printf '%s\n' "$distinct" | grep -c .)" -gt 1 ]; then
+        die "'$target' matches more than one project - name the path:
+$(printf '%s\n' "$distinct" | sed 's/^/    /')"
+      fi
+      mapfile -t roots < <(printf '%s\n' "$hits" | cut -f2 | sort -un)
       ;;
   esac
 
@@ -632,7 +727,7 @@ port_cmd() {
 # every DASH_INT seconds. Nothing here signals anything on its own - `x` hands
 # the selection to the same kill_cmd the CLI uses, guards and confirm included.
 
-DASH_VIEWS="overview procs idle ports groups"
+DASH_VIEWS="overview procs idle ports groups projects"
 DASH_VIEW=overview
 DASH_INT=2
 DASH_PAUSED=0
@@ -654,11 +749,11 @@ PREVF=""
 SNAP_ROWS=""
 POINTER=">"
 OUT=()
-VIEW_ROWS=(); VIEW_PIDS=(); VIEW_PORTS=(); VIEW_HDR=""
+VIEW_ROWS=(); VIEW_PIDS=(); VIEW_PORTS=(); VIEW_KEYS=(); VIEW_HDR=""
 OVER_PORTS=(); OVER_GROUPS=(); HDR_PORTS=""; HDR_GROUPS=""
 # read through a nameref in push_hist and _spark, which shellcheck cannot see
 # shellcheck disable=SC2034
-HIST_RAM=() HIST_CPU=() HIST_SWP=()
+HIST_RAM=() HIST_CPU=() HIST_SWP=() HIST_PSI=()
 EASE_RAM=0; EASE_SWP=0; EASE_CPU=0
 TGT_RAM=0;  TGT_SWP=0;  TGT_CPU=0
 MEM_T=1; MEM_A=0; SW_T=0; SW_F=0
@@ -730,24 +825,33 @@ dash_sample() {
   read_mem; read_cpu
   UPSTR=$(uptime_h)
   read -r L1 L5 L15 _ < /proc/loadavg
-  # pgrep cannot filter on process state, so ps + grep is the right tool here
-  # shellcheck disable=SC2009
-  DSTATE=$(ps -eo stat= | grep -c '^D' || true)
+  psi_read || true
+  if [ "$PSI_OK" != 1 ]; then
+    # only worth a fork on a kernel with no PSI, where it is the best proxy
+    # pgrep cannot filter on process state, so ps + grep is the right tool here
+    # shellcheck disable=SC2009
+    DSTATE=$(ps -eo stat= | grep -c '^D' || true)
+  fi
 
   TGT_RAM=$(( (MEM_T - MEM_A) * 1000 / MEM_T ))
   if [ "$SW_T" -gt 0 ]; then TGT_SWP=$(( (SW_T - SW_F) * 1000 / SW_T )); else TGT_SWP=0; fi
   push_hist HIST_RAM "$TGT_RAM"
   push_hist HIST_SWP "$TGT_SWP"
   push_hist HIST_CPU "$TGT_CPU"
+  push_hist HIST_PSI $(( PSI_MEM / 10 ))
 
   ALERTS=()
+  psi_alerts
+  local a
+  for a in ${PSI_ALERTS[@]+"${PSI_ALERTS[@]}"}; do ALERTS+=("${a#*|}"); done
   if [ "$SW_T" -gt 0 ] && [ "$TGT_SWP" -ge 800 ]; then
     ALERTS+=("! swap is $(( TGT_SWP / 10 ))% full - the box is paging heavily")
   fi
   if [ $(( MEM_A * 100 / MEM_T )) -le 15 ]; then
     ALERTS+=("! only $(humb "$MEM_A") available RAM ($(( MEM_A * 100 / MEM_T ))%) - close something")
   fi
-  [ "$DSTATE" -gt 0 ] && ALERTS+=("! $DSTATE process(es) in D state (blocked on disk / page-in)")
+  [ "$PSI_OK" != 1 ] && [ "$DSTATE" -gt 0 ] &&
+    ALERTS+=("! $DSTATE process(es) in D state (blocked on disk / page-in)")
 
   SNAP=$(snapshot)
   # join the previous tick counts in, so each row carries a real instant CPU%
@@ -769,11 +873,12 @@ dash_sample() {
 # ---- row builders ---------------------------------------------------------
 # each fills VIEW_ROWS (rendered) plus VIEW_PIDS / VIEW_PORTS (parallel keys)
 dash_build() {
-  VIEW_ROWS=(); VIEW_PIDS=(); VIEW_PORTS=(); OVER_PORTS=(); OVER_GROUPS=()
+  VIEW_ROWS=(); VIEW_PIDS=(); VIEW_PORTS=(); VIEW_KEYS=(); OVER_PORTS=(); OVER_GROUPS=()
   case "$DASH_VIEW" in
-    ports)  VIEW_HDR=$(dash_hdr_ports) ;;
-    groups) VIEW_HDR=$(dash_hdr_groups) ;;
-    *)      VIEW_HDR=$(dash_hdr_proc) ;;
+    ports)    VIEW_HDR=$(dash_hdr_ports) ;;
+    groups)   VIEW_HDR=$(dash_hdr_groups) ;;
+    projects) VIEW_HDR=$(dash_hdr_projects) ;;
+    *)        VIEW_HDR=$(dash_hdr_proc) ;;
   esac
   if [ "$DASH_VIEW" = overview ]; then
     # the same three blocks the one-shot report prints, in the same order
@@ -789,6 +894,7 @@ dash_build() {
     idle)     dash_rows_idle ;;
     ports)    dash_rows_ports ;;
     groups)   dash_rows_groups ;;
+    projects) dash_rows_projects ;;
   esac
   local n=${#VIEW_ROWS[@]}
   [ "$DASH_SEL" -ge "$n" ] && DASH_SEL=$(( n > 0 ? n - 1 : 0 ))
@@ -806,8 +912,10 @@ dash_rows_proc() {
   local limit="$1" key rows
   key=$(dash_sortkey)
   rows=$(printf '%s\n' "$SNAP_ROWS" | sort -t$'\t' -k"$key","$key"nr)
+  # index(), not ~: a filter is whatever the user typed. As an ERE, "c++" would
+  # quietly match every c, and "[" would abort awk and empty the view
   [ -n "$DASH_FILTER" ] && rows=$(printf '%s\n' "$rows" | awk -F'\t' -v f="$DASH_FILTER" \
-    'BEGIN { f = tolower(f) } tolower($7) ~ f || $1 == f || $6 ~ f')
+    'BEGIN { f = tolower(f) } index(tolower($7), f) || $1 == f || index($6, f)')
   [ "$limit" -gt 0 ] && rows=$(printf '%s\n' "$rows" | head -n "$limit")
   [ -z "${rows//[[:space:]]/}" ] && return 0
   mapfile -t VIEW_ROWS < <(printf '%s\n' "$rows" | dash_fmt_proc)
@@ -942,11 +1050,32 @@ dash_rows_groups() {
 
 dash_hdr_groups() { printf '%-12s %5s %9s %8s %6s  %s' GROUP COUNT RAM SWAP "CPU%" SHARE; }
 
+dash_rows_projects() {
+  local rows
+  rows=$(project_scan)
+  [ -z "${rows//[[:space:]]/}" ] && return 0
+  mapfile -t VIEW_ROWS < <(printf '%s\n' "$rows" | awk -F'\t' -v CD="$C_DIM" -v C0="$C_0" \
+    -v CG="$C_G" -v CY="$C_Y" -v CC="$C_C" -v CR="$C_R" -v HOME="$HOME" -v W="$TCOLS" "$AWKLIB"'
+    function tilde(p) { sub("^" HOME "/", "~/", p); return p }
+    { printf "%s%5d%s %s%9s%s %s%8s%s  %s%-12s%s %s%s%s\n",
+        CD, $2, C0, CG, hum($3), C0, ($4 > 0 ? CY : CD), ($4 > 0 ? hum($4) : "-"), C0,
+        CC, substr($5, 1, 12), C0, ($6 ? CR : ""), shorten(tilde($1), W - 42), C0 }')
+  mapfile -t VIEW_KEYS < <(printf '%s\n' "$rows" | cut -f1)
+  return 0
+}
+
+dash_hdr_projects() { printf '%5s %9s %8s  %-12s %s' PROCS RAM SWAP PORTS PROJECT; }
+
 # ---- painting -------------------------------------------------------------
 dash_line() { OUT+=("$1"); }
 
+# The format strings below are deliberately held in a variable: each row is
+# printed twice, once with colour and once plain, and the two must not drift
+# apart or the width budget is wrong. They are literals in this file, never
+# anything a user supplies.
+# shellcheck disable=SC2059
 dash_header() {
-  local sp bw pulse a line paused="" used
+  local sp bw pulse a line plain paused="" used total blank12="            "
   sp=${SPIN[$(( FRAME / 2 % ${#SPIN[@]} ))]}
   ease EASE_RAM "$TGT_RAM"
   ease EASE_SWP "$TGT_SWP"
@@ -959,32 +1088,48 @@ dash_header() {
     "$C_DIM" -1 "$UPSTR" "$DASH_INT" "$paused" "$C_0"
   OUT+=("$line")
 
+  # Every row here builds a plain twin of itself, so the sparkline can be given
+  # the columns that are actually left. Without that the line wraps, and
+  # dash_paint positions rows absolutely, so a wrap eats the row below it.
+  local fmt=' %sRAM%s %s %s%4d%%%s %8s of %-8s '
   _abar "$EASE_RAM" "$bw"; local rambar=$REPLY
-  _spark HIST_RAM 1000; local ramspk=$REPLY
   _humb $(( MEM_T - MEM_A )); used=$REPLY
-  _humb "$MEM_T"
-  printf -v line ' %sRAM%s %s %s%4d%%%s %8s of %-8s %s%s' \
-    "$C_B" "$C_0" "$rambar" "$C_B" $(( (EASE_RAM + 5) / 10 )) "$C_0" \
-    "$used" "$REPLY" "$ramspk" "$C_0"
-  OUT+=("$line")
+  _humb "$MEM_T"; total=$REPLY
+  printf -v line  "$fmt" "$C_B" "$C_0" "$rambar" "$C_B" $(( (EASE_RAM + 5) / 10 )) "$C_0" "$used" "$total"
+  printf -v plain "$fmt" "" "" "" "" $(( (EASE_RAM + 5) / 10 )) "" "$used" "$total"
+  _spark HIST_RAM 1000 $(( TCOLS - ${#plain} - bw ))
+  OUT+=("${line}${REPLY}${C_0}")
 
   if [ "$SW_T" -gt 0 ]; then
+    fmt=' %sSWP%s %s %s%4d%%%s %8s of %-8s '
     _abar "$EASE_SWP" "$bw"; local swpbar=$REPLY
-    _spark HIST_SWP 1000; local swpspk=$REPLY
     _humb $(( SW_T - SW_F )); used=$REPLY
-    _humb "$SW_T"
-    printf -v line ' %sSWP%s %s %s%4d%%%s %8s of %-8s %s%s' \
-      "$C_B" "$C_0" "$swpbar" "$C_B" $(( (EASE_SWP + 5) / 10 )) "$C_0" \
-      "$used" "$REPLY" "$swpspk" "$C_0"
-    OUT+=("$line")
+    _humb "$SW_T"; total=$REPLY
+    printf -v line  "$fmt" "$C_B" "$C_0" "$swpbar" "$C_B" $(( (EASE_SWP + 5) / 10 )) "$C_0" "$used" "$total"
+    printf -v plain "$fmt" "" "" "" "" $(( (EASE_SWP + 5) / 10 )) "" "$used" "$total"
+    _spark HIST_SWP 1000 $(( TCOLS - ${#plain} - bw ))
+    OUT+=("${line}${REPLY}${C_0}")
   fi
 
+  fmt=' %sCPU%s %s %s%4d%%%s %sload %s %s %s on %s cores%s '
   _abar "$EASE_CPU" "$bw"; local cpubar=$REPLY
-  _spark HIST_CPU 1000
-  printf -v line ' %sCPU%s %s %s%4d%%%s %sload %s %s %s on %s cores%s %s%s' \
-    "$C_B" "$C_0" "$cpubar" "$C_B" $(( (EASE_CPU + 5) / 10 )) "$C_0" \
-    "$C_DIM" "$L1" "$L5" "$L15" "$CORES" "$C_0" "$REPLY" "$C_0"
-  OUT+=("$line")
+  printf -v line  "$fmt" "$C_B" "$C_0" "$cpubar" "$C_B" $(( (EASE_CPU + 5) / 10 )) "$C_0" \
+    "$C_DIM" "$L1" "$L5" "$L15" "$CORES" "$C_0"
+  printf -v plain "$fmt" "" "" "" "" $(( (EASE_CPU + 5) / 10 )) "" "" "$L1" "$L5" "$L15" "$CORES" ""
+  _spark HIST_CPU 1000 $(( TCOLS - ${#plain} - bw ))
+  OUT+=("${line}${REPLY}${C_0}")
+
+  if [ "$PSI_OK" = 1 ]; then
+    # three fixed 12-column cells; the label is the first thing to go
+    local lbl="stalled, last 10s"
+    [ "$TCOLS" -lt 100 ] && lbl=""
+    fmt=' %sSTL%s %s cpu %s mem %s io  %s%s%s '
+    printf -v line  "$fmt" "$C_B" "$C_0" "$(psi_cell "$PSI_CPU")" "$(psi_cell "$PSI_MEM")" \
+      "$(psi_cell "$PSI_IO")" "$C_DIM" "$lbl" "$C_0"
+    printf -v plain "$fmt" "" "" "$blank12" "$blank12" "$blank12" "" "$lbl" ""
+    _spark HIST_PSI 1000 $(( TCOLS - ${#plain} ))
+    OUT+=("${line}${REPLY}${C_0}")
+  fi
 
   if [ "${#ALERTS[@]}" -gt 0 ]; then
     # a slow pulse, so a real warning is hard to scroll past
@@ -1006,18 +1151,20 @@ dash_footer() {
       keys="${C_ACC}up/dn${C_0} move  ${C_ACC}x${C_0} kill  ${C_ACC}t${C_0} tree  ${C_ACC}s${C_0} sort:${DASH_SORT}  ${C_ACC}/${C_0} filter" ;;
     ports)
       keys="${C_ACC}up/dn${C_0} move  ${C_ACC}x${C_0} kill port  ${C_ACC}t${C_0} tree" ;;
+    projects)
+      keys="${C_ACC}up/dn${C_0} move  ${C_ACC}x${C_0} kill project" ;;
     *)
       keys="${C_ACC}tab${C_0} next view" ;;
   esac
   OUT+=("")
-  OUT+=(" ${C_DIM}${keys}  ${C_ACC}1-5${C_0} views  ${C_ACC}+ -${C_0} rate  ${C_ACC}p${C_0} pause  ${C_ACC}?${C_0} help  ${C_ACC}q${C_0} quit${C_0}")
+  OUT+=(" ${C_DIM}${keys}  ${C_ACC}1-6${C_0} views  ${C_ACC}+ -${C_0} rate  ${C_ACC}p${C_0} pause  ${C_ACC}?${C_0} help  ${C_ACC}q${C_0} quit${C_0}")
   [ -n "$DASH_MSG" ] && OUT+=(" $DASH_MSG")
   return 0
 }
 
 dash_help_panel() {
   OUT+=(" ${C_B}KEYS${C_0}")
-  OUT+=("   ${C_ACC}1${C_0} overview  ${C_ACC}2${C_0} processes  ${C_ACC}3${C_0} idle  ${C_ACC}4${C_0} ports  ${C_ACC}5${C_0} groups  ${C_ACC}tab${C_0} cycle")
+  OUT+=("   ${C_ACC}1${C_0} overview  ${C_ACC}2${C_0} processes  ${C_ACC}3${C_0} idle  ${C_ACC}4${C_0} ports  ${C_ACC}5${C_0} groups  ${C_ACC}6${C_0} projects  ${C_ACC}tab${C_0} cycle")
   OUT+=("   ${C_ACC}up down / j k${C_0}  move the selection    ${C_ACC}pgup pgdn${C_0}  page")
   OUT+=("   ${C_ACC}s${C_0}   sort by rss, cpu, swap, uptime")
   OUT+=("   ${C_ACC}/${C_0}   filter on command, pid or group (empty line clears it)")
@@ -1104,7 +1251,7 @@ dash_render() {
     dash_line "  ${C_DIM}(nothing here)${C_0}"
   else
     for (( i = DASH_TOP; i < n && i < DASH_TOP + body; i++ )); do
-      if [ "$i" = "$DASH_SEL" ] && [ "${#VIEW_PIDS[@]}" -gt 0 ]; then
+      if [ "$i" = "$DASH_SEL" ] && { [ "${#VIEW_PIDS[@]}" -gt 0 ] || [ "${#VIEW_KEYS[@]}" -gt 0 ]; }; then
         mark="${C_ACC}${POINTER}${C_0} "
       else
         mark="  "
@@ -1216,6 +1363,7 @@ dash_keys() {
     3)       dash_goto idle ;;
     4)       dash_goto ports ;;
     5)       dash_goto groups ;;
+    6)       dash_goto projects ;;
     $'\t'|right) dash_view_step 1 ;;
     left)    dash_view_step -1 ;;
     s)       case "$DASH_SORT" in
@@ -1232,7 +1380,12 @@ dash_keys() {
     /)       dash_prompt "filter:"; DASH_FILTER=$REPLY; dash_goto "$DASH_VIEW" ;;
     t)       if pid=$(dash_selected_pid); then dash_shell_out dash_do_tree "$pid"
              else DASH_MSG="${C_Y}nothing selected${C_0}"; fi ;;
-    x)       if [ "$DASH_VIEW" = ports ] && [ "${#VIEW_PORTS[@]}" -gt "$DASH_SEL" ]; then
+    x)       if [ "$DASH_VIEW" = projects ] && [ "${#VIEW_KEYS[@]}" -gt "$DASH_SEL" ]; then
+               case "${VIEW_KEYS[$DASH_SEL]}" in
+                 /*) dash_shell_out dash_do_kill project "${VIEW_KEYS[$DASH_SEL]}" ;;
+                 *)  DASH_MSG="${C_Y}that row is a bucket, not a project${C_0}" ;;
+               esac
+             elif [ "$DASH_VIEW" = ports ] && [ "${#VIEW_PORTS[@]}" -gt "$DASH_SEL" ]; then
                dash_shell_out dash_do_kill port "${VIEW_PORTS[$DASH_SEL]}"
              elif pid=$(dash_selected_pid); then
                dash_shell_out dash_do_kill pid "$pid"
@@ -1311,6 +1464,363 @@ watch_plain() {
   done
 }
 
+# ------------------------------------------------------------- projects ----
+# Which project is costing you, rather than which process. Every process is
+# attributed to the directory it was started in, walked up to the nearest
+# project marker, so the five node processes of one dev server land on one row.
+#
+# cwd is only readable for your own processes; anything else lands in
+# "unattributed", which is honest rather than silently wrong.
+PROJECT_MARKERS='.git/HEAD .git package.json composer.json go.mod Cargo.toml pyproject.toml'
+
+cwd_map() {
+  # one ls, not one readlink per pid. Processes owned by another user have an
+  # unreadable link and simply come back without a " -> " part.
+  # shellcheck disable=SC2012  # find would walk into /proc, which costs far more
+  ls -l /proc/[0-9]*/cwd 2>/dev/null | awk '
+    { i = index($0, " -> ")
+      if (!i) next
+      link = substr($0, 1, i - 1)
+      target = substr($0, i + 4)
+      sub(/ \(deleted\)$/, "", target)
+      if (match(link, /\/proc\/[0-9]+\/cwd$/))
+        printf "C\t%s\t%s\n", substr(link, RSTART + 6, RLENGTH - 10), target }'
+}
+
+port_map() {
+  ss -tlnpH | awk '
+    { n = split($4, a, ":")
+      if (match($0, /pid=[0-9]+/))
+        printf "P\t%s\t%s\n", substr($0, RSTART + 4, RLENGTH - 4), a[n] }' | sort -u
+}
+
+# the walk from a working directory up to its project root, shared by the
+# view and by "kill project". Results are cached per directory: a dev server's
+# processes nearly all share one cwd.
+PROOTLIB='
+  function exists(f,   r) { r = (getline < f); close(f); return r >= 0 }
+  function ismark(p,   i, ok) {
+    if (p in mc) return mc[p]
+    ok = 0
+    for (i = 1; i <= nm; i++) if (exists(p "/" m[i])) { ok = 1; break }
+    return mc[p] = ok
+  }
+  function proot(d,   p, i) {
+    if (d in rc) return rc[d]
+    p = d
+    for (i = 0; i < 12; i++) {
+      if (p == "" || p == "/") break
+      if (ismark(p)) return rc[d] = p
+      sub(/\/[^\/]*$/, "", p)
+    }
+    return rc[d] = ""
+  }
+  BEGIN { nm = split(MARK, m, " ") }
+'
+
+# TSV: root  procs  rss  swap  ports  onmnt   (rss desc, the buckets last)
+project_scan() {
+  { port_map; cwd_map; snap | sed 's/^/S\t/'; } | awk -F'\t' -v MARK="$PROJECT_MARKERS" \
+  "$PROOTLIB"'
+  $1 == "C" { cwd[$2] = $3; next }
+  $1 == "P" { if (!($2 in pt) || index(pt[$2], $3) == 0) pt[$2] = pt[$2] (pt[$2] ? "," : "") $3; next }
+  $1 == "S" {
+    pid = $2; rss = $3 + 0; sw = $4 + 0
+    if (!(pid in cwd)) { hn++; hr += rss; hs += sw; next }   # cwd not readable
+    r = proot(cwd[pid])
+    if (r == "") { un++; ur += rss; us += sw; next }          # no project marker
+    if (!(r in n)) roots[++nr] = r
+    n[r]++; rr[r] += rss; sr[r] += sw
+    if (pid in pt) if (index(prt[r], pt[pid]) == 0)
+      prt[r] = prt[r] (prt[r] ? "," : "") pt[pid]
+  }
+  END {
+    for (k = 1; k <= nr; k++) {
+      best = -1; bi = 0
+      for (j = 1; j <= nr; j++) {
+        r = roots[j]
+        if (done[r] || !(r in n)) continue
+        if (rr[r] > best) { best = rr[r]; bi = j }
+      }
+      if (!bi) break
+      r = roots[bi]; done[r] = 1
+      printf "%s\t%d\t%d\t%d\t%s\t%d\n", r, n[r], rr[r], sr[r],
+             (prt[r] == "" ? "-" : prt[r]), (index(r, "/mnt/") == 1 ? 1 : 0)
+    }
+    if (un) printf "%s\t%d\t%d\t%d\t%s\t%d\n", "(not in a project)", un, ur, us, "-", 0
+    if (hn) printf "%s\t%d\t%d\t%d\t%s\t%d\n", "(cwd not readable - other users)", hn, hr, hs, "-", 0
+  }'
+}
+
+# "root<TAB>pid" for every process of the named project. The name matches a
+# full path, a ~-relative path, or the last path component.
+project_pids() {
+  { cwd_map; snap | sed 's/^/S\t/'; } | awk -F'\t' -v MARK="$PROJECT_MARKERS" \
+    -v WANT="$1" -v HOME="$HOME" "$PROOTLIB"'
+    $1 == "C" { cwd[$2] = $3; next }
+    $1 == "S" {
+      if (!($2 in cwd)) next
+      r = proot(cwd[$2])
+      if (r == "") next
+      b = r; sub(/^.*\//, "", b)
+      w = WANT; sub("^~/", HOME "/", w); sub("/$", "", w)
+      if (r == w || b == WANT) printf "%s\t%s\n", r, $2
+    }'
+}
+
+projects_cmd() {
+  local rows mnt
+  rows=$(project_scan)
+  printf '%s%sPROJECTS%s %s(processes grouped by the project directory they run in)%s\n' \
+    "" "$C_B" "$C_0" "$C_DIM" "$C_0"
+  if [ -z "${rows//[[:space:]]/}" ]; then
+    printf '  %s(nothing attributable)%s\n\n' "$C_DIM" "$C_0"
+    return
+  fi
+  printf '%s\n' "$rows" | awk -F'\t' -v CD="$C_DIM" -v C0="$C_0" -v CG="$C_G" \
+    -v CY="$C_Y" -v CC="$C_C" -v CR="$C_R" -v HOME="$HOME" "$AWKLIB"'
+    function tilde(p) { sub("^" HOME "/", "~/", p); return p }
+    BEGIN { printf "  %6s %9s %9s  %-14s %s\n", "PROCS", "RAM", "SWAP", "PORTS", "PROJECT" }
+    { printf "  %s%6d%s %s%9s%s %s%9s%s  %s%-14s%s %s%s%s\n",
+        CD, $2, C0, CG, hum($3), C0, ($4 > 0 ? CY : CD), ($4 > 0 ? hum($4) : "-"), C0,
+        CC, substr($5, 1, 14), C0, ($6 ? CR : ""), tilde($1), C0
+      t += $3; s += $4; n += $2 }
+    END { printf "  %s%6d %9s %9s%s\n", CD, n, hum(t), (s > 0 ? hum(s) : "-"), C0 }'
+  mnt=$(printf '%s\n' "$rows" | awk -F'\t' '$6 == 1 { print $1 }')
+  if [ -n "$mnt" ]; then
+    echo
+    printf '  %s! on the Windows filesystem: %s%s\n' "$C_R" "$(printf '%s' "$mnt" | tr '\n' ' ')" "$C_0"
+    printf '  %severy open and stat crosses the 9P bridge - metadata-heavy work\n' "$C_DIM"
+    printf '  (git status, node_modules, installs) runs 10-100x slower there than\n'
+    printf '  under %s. Moving the checkout is usually the single biggest win.%s\n' "$HOME" "$C_0"
+  fi
+  echo
+}
+
+# --------------------------------------------------------------- doctor ----
+# Everything above answers "what is running". This answers "is this box set up
+# to survive it": the WSL memory cap, whether freed memory ever goes back to
+# Windows, whether the virtual disk can still grow, and whether your code is
+# on the slow side of the 9P bridge.
+#
+# Every Windows-side lookup degrades to "unknown" rather than failing, so this
+# still runs on a plain Linux box or with interop turned off.
+
+is_wsl() { grep -qi microsoft /proc/version; }
+
+DOC_FINDINGS=()
+finding() { DOC_FINDINGS+=("$1|$2"); }   # crit|warn|ok|tip , text
+
+# size string from .wslconfig ("10GB", "512MB", "8G") to KB, or empty
+cfg_kb() {
+  awk -v v="$1" 'BEGIN{
+    s = toupper(v); n = s + 0
+    if (n <= 0) { print ""; exit }
+    if (s ~ /TB?$/) n *= 1024 * 1024 * 1024
+    else if (s ~ /GB?$/) n *= 1024 * 1024
+    else if (s ~ /MB?$/) n *= 1024
+    else if (s ~ /KB?$/) n *= 1
+    else n /= 1024                      # bare number is bytes
+    printf "%d", n
+  }'
+}
+
+declare -A CFG=()
+CFG_PATH=""
+
+read_wslconfig() {
+  local f k v line
+  CFG=(); CFG_PATH=""
+  for f in /mnt/c/Users/*/.wslconfig; do [ -r "$f" ] && CFG_PATH="$f" && break; done
+  if [ -z "$CFG_PATH" ] && command -v cmd.exe > /dev/null; then
+    # the glob missed it, so ask Windows where the profile actually is
+    local up
+    up=$(cd /mnt/c && cmd.exe /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r')
+    [ -n "$up" ] && f=$(wslpath -u "$up" 2>/dev/null)/.wslconfig && [ -r "$f" ] && CFG_PATH="$f"
+  fi
+  [ -n "$CFG_PATH" ] || return 1
+  while IFS= read -r line; do
+    k=${line%%=*}; v=${line#*=}
+    CFG[$k]=$v
+  done < <(awk '
+    /^[[:space:]]*[;#]/ { next }
+    /^[[:space:]]*\[/ { sec = $0; gsub(/[][[:space:]]/, "", sec); sec = tolower(sec); next }
+    /=/ { k = $0; sub(/=.*/, "", k); v = $0; sub(/[^=]*=/, "", v)
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", k)
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+          if (k != "") printf "%s.%s=%s\n", sec, tolower(k), v }
+  ' "$CFG_PATH")
+}
+
+WIN_RAM_KB=""; WIN_BASE=""
+read_windows() {
+  command -v powershell.exe > /dev/null || return 1
+  local out
+  # one interop call, not two: each costs about a third of a second
+  out=$(cd / && powershell.exe -NoProfile -Command \
+    "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory; (Get-ChildItem HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss | ForEach-Object { (Get-ItemProperty \$_.PSPath).BasePath }) -join ';'" \
+    2>/dev/null | tr -d '\r') || return 1
+  WIN_RAM_KB=$(printf '%s' "$out" | sed -n '1p' | awk '{ printf "%d", $1 / 1024 }')
+  WIN_BASE=$(printf '%s' "$out" | sed -n '2p')
+  [ -n "$WIN_RAM_KB" ]
+}
+
+doc_row() { printf '    %-20s %s\n' "$1" "$2"; }
+
+doctor_cmd() {
+  local mt st mem_kb swap_kb vhdx vhdx_sz drive freek usedk pct f
+
+  printf '%s%sWSL DOCTOR%s %s(configuration, not processes - nothing here changes anything)%s\n\n' \
+    "" "$C_B" "$C_0" "$C_DIM" "$C_0"
+
+  if ! is_wsl; then
+    printf '  %sthis is not a WSL instance - the checks below are WSL-specific%s\n\n' \
+      "$C_Y" "$C_0"
+    return 0
+  fi
+
+  mt=$(meminfo MemTotal); st=$(meminfo SwapTotal)
+
+  # ---- .wslconfig --------------------------------------------------------
+  printf '  %sCONFIG%s\n' "$C_B" "$C_0"
+  if read_wslconfig; then
+    doc_row "file" "$CFG_PATH"
+    # keys are folded to lower case when parsed; print them the way the docs
+    # spell them, so a line can be copied straight back into the file
+    for f in wsl2.memory:memory wsl2.processors:processors wsl2.swap:swap \
+             wsl2.swapfile:swapFile wsl2.networkingmode:networkingMode \
+             experimental.automemoryreclaim:autoMemoryReclaim \
+             experimental.sparsevhd:sparseVhd; do
+      [ -n "${CFG[${f%%:*}]:-}" ] && doc_row "${f#*:}" "${CFG[${f%%:*}]}"
+    done
+  else
+    doc_row "file" "${C_Y}not found${C_0}"
+  fi
+  doc_row "guest sees" "$(hum_kb "$mt") RAM, $(nproc) cores, $(hum_kb "$st") swap"
+  echo
+
+  # ---- host --------------------------------------------------------------
+  printf '  %sHOST%s\n' "$C_B" "$C_0"
+  if read_windows; then
+    doc_row "windows RAM" "$(hum_kb "$WIN_RAM_KB")"
+    mem_kb=$(cfg_kb "${CFG[wsl2.memory]:-}")
+    if [ -n "$mem_kb" ]; then
+      pct=$(( mem_kb * 100 / WIN_RAM_KB ))
+      doc_row "WSL cap" "$(hum_kb "$mem_kb") = ${pct}% of host RAM"
+      if [ "$pct" -ge 80 ]; then
+        finding crit "memory=${CFG[wsl2.memory]} is ${pct}% of host RAM - Windows can run out of commit and kill the VM"
+      fi
+    else
+      pct=$(( mt * 100 / WIN_RAM_KB ))
+      finding warn "no memory= cap - WSL defaults to 50% of host RAM ($(hum_kb $(( WIN_RAM_KB / 2 ))))"
+    fi
+  else
+    doc_row "windows RAM" "${C_DIM}unknown (no interop)${C_0}"
+    [ -n "${CFG[wsl2.memory]:-}" ] || finding warn "no memory= cap in .wslconfig - WSL defaults to 50% of host RAM"
+  fi
+  echo
+
+  # ---- memory returned to windows ---------------------------------------
+  case "${CFG[experimental.automemoryreclaim]:-}" in
+    "")            finding tip "autoMemoryReclaim is unset - freed memory stays inside the VM until you restart it" ;;
+    disabled|off)  finding warn "autoMemoryReclaim=${CFG[experimental.automemoryreclaim]} - freed memory never goes back to Windows" ;;
+    *)             finding ok "autoMemoryReclaim=${CFG[experimental.automemoryreclaim]} - freed memory returns to Windows" ;;
+  esac
+
+  swap_kb=$(cfg_kb "${CFG[wsl2.swap]:-}")
+  if [ "${CFG[wsl2.swap]:-}" = "0" ]; then
+    finding warn "swap=0 - when the cap is reached the OOM killer runs instead of paging"
+  elif [ -n "$mem_kb" ] && [ -n "$swap_kb" ] && [ "$swap_kb" -lt $(( mem_kb / 4 )) ]; then
+    finding tip "swap ($(hum_kb "$swap_kb")) is small next to the $(hum_kb "$mem_kb") cap - little headroom before the OOM killer"
+  fi
+
+  # ---- disk --------------------------------------------------------------
+  printf '  %sDISK%s\n' "$C_B" "$C_0"
+  vhdx=$(find_vhdx)
+  if [ -n "$vhdx" ] && [ -r "$vhdx" ]; then
+    vhdx_sz=$(stat -c %s "$vhdx")
+    vhdx_sz=$(( vhdx_sz / 1024 ))
+    drive=$(printf '%s' "$vhdx" | cut -d/ -f1-3)
+    freek=$(df -Pk "$drive" | awk 'NR == 2 { print $4 }')
+    usedk=$(df -Pk / | awk 'NR == 2 { print $3 }')
+    doc_row "ext4.vhdx" "$(hum_kb "$vhdx_sz") on disk   $vhdx"
+    doc_row "used inside" "$(hum_kb "$usedk") of $(df -Ph / | awk 'NR == 2 { print $2 }')"
+    doc_row "host drive free" "$(hum_kb "$freek")"
+    if [ "$freek" -lt 20971520 ]; then
+      finding crit "only $(hum_kb "$freek") free where the VHDX lives - it grows on demand and cannot shrink past that"
+    fi
+    if [ "$vhdx_sz" -gt $(( usedk + usedk / 5 + 5242880 )) ]; then
+      finding tip "VHDX is $(hum_kb "$vhdx_sz") but only $(hum_kb "$usedk") is used inside - sudo fstrim -a returns the slack"
+    fi
+  else
+    doc_row "ext4.vhdx" "${C_DIM}not located${C_0}"
+  fi
+  case "${CFG[experimental.sparsevhd]:-}" in
+    true|1) finding ok "sparseVhd=true - the VHDX shrinks as you delete files" ;;
+    "")     finding tip "sparseVhd is unset - the VHDX grows forever and never shrinks on its own" ;;
+    *)      finding warn "sparseVhd=${CFG[experimental.sparsevhd]} - the VHDX will not shrink on its own" ;;
+  esac
+  echo
+
+  # ---- where the code lives ---------------------------------------------
+  printf '  %sPROJECTS%s\n' "$C_B" "$C_0"
+  local mnt
+  mnt=$(project_scan | awk -F'\t' '$6 == 1 { print $1 }')
+  if [ -n "$mnt" ]; then
+    printf '%s\n' "$mnt" | while read -r f; do doc_row "on windows fs" "${C_R}${f}${C_0}"; done
+    finding warn "code under /mnt is on the 9P bridge - metadata-heavy work runs 10-100x slower there"
+  else
+    doc_row "on windows fs" "none - everything is on ext4"
+  fi
+  echo
+
+  # ---- right now ---------------------------------------------------------
+  psi_read || true
+  if [ "$PSI_OK" = 1 ]; then
+    printf '  %sPRESSURE%s  %s(stalled share of the last 10s)%s\n' "$C_B" "$C_0" "$C_DIM" "$C_0"
+    doc_row "cpu / mem / io" "$(pctstr "$PSI_CPU")  $(pctstr "$PSI_MEM")  $(pctstr "$PSI_IO")"
+    psi_alerts
+    for f in ${PSI_ALERTS[@]+"${PSI_ALERTS[@]}"}; do
+      case "$f" in crit\|*) finding crit "${f#*|! }" ;; *) finding warn "${f#*|! }" ;; esac
+    done
+    echo
+  fi
+
+  # ---- findings ----------------------------------------------------------
+  printf '  %sFINDINGS%s\n' "$C_B" "$C_0"
+  local sev txt col
+  for f in ${DOC_FINDINGS[@]+"${DOC_FINDINGS[@]}"}; do
+    sev=${f%%|*}; txt=${f#*|}
+    case "$sev" in
+      crit) col=$C_R ;;
+      warn) col=$C_Y ;;
+      ok)   col=$C_G ;;
+      *)    col=$C_C ;;
+    esac
+    printf '    %s%-5s%s %s\n' "$col" "$sev" "$C_0" "$txt"
+  done
+  [ "${#DOC_FINDINGS[@]}" -eq 0 ] && printf '    %snothing to flag%s\n' "$C_G" "$C_0"
+  echo
+  printf '  %sedit %s then run: wsl --shutdown  (from Windows) to apply%s\n\n' \
+    "$C_DIM" "${CFG_PATH:-%USERPROFILE%\\.wslconfig}" "$C_0"
+}
+
+# the distro's VHDX, from the registry when interop works, by search otherwise
+find_vhdx() {
+  local b p
+  if [ -z "$WIN_BASE" ]; then read_windows || true; fi
+  for b in ${WIN_BASE//;/ }; do
+    b=${b#\\\\?\\}
+    p=$(wslpath -u "$b" 2>/dev/null)/ext4.vhdx
+    [ -r "$p" ] && { printf '%s' "$p"; return 0; }
+  done
+  for p in /mnt/*/Users/*/AppData/Local/Packages/*/LocalState/ext4.vhdx \
+           /mnt/*/Users/*/AppData/Local/wsl/*/ext4.vhdx; do
+    [ -r "$p" ] && { printf '%s' "$p"; return 0; }
+  done
+  return 1
+}
+
 # ------------------------------------------------------------------- help ----
 usage() {
   cat <<EOF
@@ -1324,6 +1834,8 @@ ${C_B}LOOKING${C_0}
   ${C_C}wslps top${C_0} [N]              N biggest processes by RAM        (default 15)
   ${C_C}wslps swap${C_0} [N]             N biggest swap hogs               (default 15)
   ${C_C}wslps idle${C_0}                 long-running processes doing nothing
+  ${C_C}wslps projects${C_0}             what each project costs, and the ports it owns
+  ${C_C}wslps doctor${C_0}               is this WSL box configured to survive your work
   ${C_C}wslps group${C_0} <name>         every process in one group
   ${C_C}wslps ports${C_0}                everything listening
   ${C_C}wslps port${C_0} <n>             who owns port n, its project dir, its tree
@@ -1335,6 +1847,7 @@ ${C_B}STOPPING${C_0}
   ${C_C}wslps kill port${C_0} <n>        stop whatever serves port n, plus its children
   ${C_C}wslps kill pid${C_0} <n>         stop one process plus its children
   ${C_C}wslps kill group${C_0} <name>    stop every process in a group
+  ${C_C}wslps kill project${C_0} <name>  stop everything running in one project
 
   Kill previews exactly what dies and how much it frees, then asks.
   It refuses to touch your own shell or the session you are typing in.
@@ -1344,13 +1857,14 @@ ${C_B}STOPPING${C_0}
   ${C_DIM}-d${C_0}   dry run - show the victims, kill nothing
 
 ${C_B}DASHBOARD${C_0} ${C_DIM}(wslps dash)${C_0}
-  ${C_C}1-5${C_0} overview, processes, idle, ports, groups   ${C_C}tab${C_0} cycle
+  ${C_C}1-6${C_0} overview, processes, idle, ports, groups, projects   ${C_C}tab${C_0} cycle
   ${C_C}up down${C_0} move   ${C_C}s${C_0} sort   ${C_C}/${C_0} filter   ${C_C}t${C_0} tree
   ${C_C}x${C_0} stop the selection (asks first)   ${C_C}X${C_0} same with SIGKILL
   ${C_C}p${C_0} pause   ${C_C}+ -${C_0} refresh rate   ${C_C}?${C_0} help   ${C_C}q${C_0} quit
 
-  Bars, sparklines and colour turn themselves off when the output is not a
-  terminal, when NO_COLOR is set, or when WSLPS_ASCII is set.
+  Colour and block glyphs turn themselves off when the output is not a
+  terminal, when NO_COLOR is set, or when the locale is not UTF-8.
+  WSLPS_ASCII=1 keeps the colour and draws with # and . instead.
 
 ${C_B}GROUPS${C_0}
   $(group_legend)
@@ -1358,11 +1872,14 @@ ${C_B}GROUPS${C_0}
 
 ${C_B}EXAMPLES${C_0}
   wslps dash                  the live dashboard - watch RAM move, kill from it
+  wslps projects              which checkout is costing you, not which process
+  wslps doctor                why the box died at 3am (memory cap, disk, 9P)
   wslps swap                  who is paged out - the real cause of slowness
   wslps idle                  the dev servers you forgot about
   wslps port 3111             which project is this, and where does it live
   wslps kill port 3000        stop that Next dev server cleanly
   wslps kill group mcp -d     preview reaping every stray MCP process
+  wslps kill project foo      stop every process running in the foo checkout
   NO_COLOR=1 wslps            plain output for piping or logs
 EOF
 }
@@ -1387,6 +1904,8 @@ case "$cmd" in
   top)             header; proc_table "TOP PROCESSES" "${1:-15}" rss "" 1 ;;
   swap)            header; proc_table "SWAP HOGS" "${1:-15}" swap "" 1 ;;
   idle)            idle_cmd ;;
+  projects|proj)   header; projects_cmd ;;
+  doctor|dr)       doctor_cmd ;;
   group|g)
       [ $# -ge 1 ] || die "usage: wslps group <${WS_GROUPS// /|}>"
       valid_group "$1" || die "unknown group '$1' (valid: $WS_GROUPS)"

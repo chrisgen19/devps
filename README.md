@@ -41,6 +41,17 @@ The usual tools do not help much here:
 
 `wslps` answers the question you actually have: **which of the things I started is costing me, and can I safely stop it.**
 
+### Pressure, not load average
+
+The `STALL` row is [PSI](https://docs.kernel.org/accounting/psi.html): the share
+of the last ten seconds in which tasks were blocked waiting for CPU, memory or
+disk. It is what the warnings are built on, because
+[load average counts uninterruptible tasks](https://lwn.net/Articles/759658/)
+and so cannot tell CPU contention from IO stall. Memory `full` pressure is the
+kernel's own definition of thrashing, which is exactly the state WSL2 lands in
+when it runs out of headroom. On a kernel without PSI, wslps falls back to the
+old load-average and D-state guesses.
+
 The `SWAP` column is the point. A dev server you have not touched in five hours can be sitting on 2.9G of swap while showing under 1G of RAM, which makes it nearly invisible to every other tool.
 
 ## Install
@@ -73,6 +84,8 @@ ln -s "$PWD/wslps/wslps" ~/.local/bin/wslps
 | `wslps top [N]` | N biggest processes by RAM (default 15) |
 | `wslps swap [N]` | N biggest swap hogs (default 15) |
 | `wslps idle` | Long-running processes doing nothing |
+| `wslps projects` | What each project costs, and the ports it owns |
+| `wslps doctor` | Whether this WSL box is configured to survive your work |
 | `wslps group <name>` | Every process in one group |
 | `wslps ports` | Everything listening |
 | `wslps port <n>` | Who owns port n, its project dir, its tree |
@@ -88,6 +101,7 @@ ln -s "$PWD/wslps/wslps" ~/.local/bin/wslps
 | `wslps kill port <n>` | Stop whatever serves port n, plus its children |
 | `wslps kill pid <n>` | Stop one process plus its children |
 | `wslps kill group <name>` | Stop every process in a group |
+| `wslps kill project <name>` | Stop everything running in one project |
 
 Flags: `-y` skip confirmation, `-9` SIGKILL instead of SIGTERM, `-d` dry run.
 
@@ -175,6 +189,86 @@ when `NO_COLOR` is set, or when the locale is not UTF-8. `WSLPS_ASCII=1` keeps
 the colour but draws with `#` and `.`. Over a pipe, `wslps dash` falls back to
 reprinting the plain report on a timer.
 
+### `wslps projects` answers "which checkout is costing me"
+
+```
+PROJECTS (processes grouped by the project directory they run in)
+   PROCS       RAM      SWAP  PORTS          PROJECT
+      13      3.1G     72.6M  3111           ~/projects/budget-tracker-2026
+      33      672M      1.3G  -              ~/ag-projects/whitelabel-sites
+       8     34.2M         -  -              ~/projects/wslps
+      24      1.5G      437M  -              (not in a project)
+      57      318M     22.1M  -              (cwd not readable - other users)
+     135      5.6G      1.9G
+```
+
+Every process is attributed to the directory it was started in, walked up to
+the nearest `.git`, `package.json`, `go.mod`, `Cargo.toml` or `composer.json`.
+The five node processes behind one dev server collapse onto one row, with the
+port it serves next to it.
+
+The two buckets at the bottom are deliberate. `(not in a project)` is a process
+whose working directory has no project marker above it; `(cwd not readable)` is
+another user's process, which the kernel will not let you inspect. Neither is
+guessed at.
+
+`wslps kill project <name>` stops everything in one checkout, with the same
+preview, confirmation and guards as every other kill.
+
+### `wslps doctor` checks the box, not the processes
+
+```
+WSL DOCTOR (configuration, not processes - nothing here changes anything)
+
+  CONFIG
+    file                 /mnt/c/Users/253071.CDiomampo/.wslconfig
+    memory               10GB
+    processors           8
+    swap                 8GB
+    swapFile             D:\\wsl-swap.vhdx
+    autoMemoryReclaim    gradual
+    sparseVhd            true
+    guest sees           9.7G RAM, 8 cores, 8.0G swap
+
+  HOST
+    windows RAM          31.7G
+    WSL cap              10.0G = 31% of host RAM
+
+  DISK
+    ext4.vhdx            124G on disk   /mnt/d/wsl/Ubuntu/ext4.vhdx
+    used inside          112G of 1007G
+    host drive free      47.6G
+
+  PROJECTS
+    on windows fs        none - everything is on ext4
+
+  PRESSURE  (stalled share of the last 10s)
+    cpu / mem / io       0.0%  0.0%  0.0%
+
+  FINDINGS
+    ok    autoMemoryReclaim=gradual - freed memory returns to Windows
+    ok    sparseVhd=true - the VHDX shrinks as you delete files
+
+  edit /mnt/c/Users/253071.CDiomampo/.wslconfig then run: wsl --shutdown  (from Windows) to apply
+```
+
+Everything else in wslps answers "what is running". This answers "is this
+instance set up to survive it", which is the question you have at 3am after the
+box has already fallen over:
+
+- the `.wslconfig` memory cap, read from Windows and compared against what the
+  guest actually sees and against host RAM. No cap means WSL helps itself to
+  [half of the host](https://learn.microsoft.com/en-us/windows/wsl/wsl-config)
+- whether `autoMemoryReclaim` is on, since without it
+  [freed memory never goes back to Windows](https://devblogs.microsoft.com/commandline/memory-reclaim-in-the-windows-subsystem-for-linux-2/)
+- whether `sparseVhd` is on, and how much room the VHDX has left to grow on its
+  host drive. It grows on demand and [does not shrink on its own](https://vramlab.com/posts/wsl2-sparse-vhd-cannot-compact/)
+- any project sitting under `/mnt`, where every file operation crosses the 9P
+  bridge and metadata-heavy work runs
+  [orders of magnitude slower](https://dev.to/nomurasan/why-wsl2-is-slow-on-mntc-and-how-to-find-the-exact-operation-costing-you-time-40o7)
+
+It reads and reports. It changes nothing.
+
 ### `wslps port <n>` finds the project, not just the process
 
 ```
@@ -254,7 +348,10 @@ Kernel threads are excluded.
 - **`kill group` is broad by design.** `kill group ai-agent` can target fifty-plus processes. Preview with `-d`.
 - **`-9` skips cleanup.** Next dev servers flush caches on SIGTERM. Try the polite signal first; `wslps` only suggests `-9` if something ignored it.
 - **Ports owned by other users show `-` for pid.** Run `sudo wslps ports` to see them.
-- **`idle` is a heuristic.** It uses lifetime average CPU, so a process that was busy an hour ago and is idle now may not appear.
+- **`idle` is a heuristic.** It uses lifetime average CPU, so a process that was busy an hour ago and is idle now may not appear. The dashboard's `CPU%` column does not have this problem: it is a real delta between samples.
+- **`projects` can only see your own processes.** A working directory is readable for processes you own; anything else lands in the `(cwd not readable)` bucket rather than being guessed at.
+- **`doctor` needs Windows interop** for host RAM and the VHDX location. Without it those rows read `unknown` and the rest of the checks still run.
+- **PSI needs a kernel built with `CONFIG_PSI`.** Every current WSL2 kernel has it. Without it, wslps falls back to load average and the D-state count.
 - Set `NO_COLOR=1` for plain output when piping or logging.
 
 ## Requirements
