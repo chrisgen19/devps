@@ -48,6 +48,34 @@ ok "ports"        "$WSLPS" ports
 ok "group node"   "$WSLPS" group node
 ok "tree self"    "$WSLPS" tree $$
 
+group "pressure, projects and doctor"
+ok "projects"        "$WSLPS" projects
+ok "doctor"          "$WSLPS" doctor
+# PSI thresholds are unreachable on an idle box, so drive them from fixtures
+psidir=$(mktemp -d)
+printf 'some avg10=12.34 avg60=1.03 avg300=1.83 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n' > "$psidir/cpu"
+printf 'some avg10=70.24 avg60=68.52 avg300=69.91 total=1\nfull avg10=57.59 avg60=58.06 avg300=60.38 total=1\n' > "$psidir/memory"
+printf 'some avg10=33.30 avg60=30.00 avg300=25.00 total=1\nfull avg10=11.10 avg60=10.00 avg300=9.00 total=1\n' > "$psidir/io"
+# grep -q closes the pipe early, and with pipefail that would mask the result,
+# so read the report into a variable and match against that
+psiout=$(WSLPS_PSI_DIR="$psidir" "$WSLPS")
+case "$psiout" in
+  *"memory thrashing"*) pass "psi fixture raises the thrashing alert" ;;
+  *)                    fail "psi fixture raises the thrashing alert" ;;
+esac
+case "$psiout" in
+  *"disk stalled"*) pass "psi fixture raises the io stall alert" ;;
+  *)                fail "psi fixture raises the io stall alert" ;;
+esac
+printf 'some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n' > "$psidir/cpu"
+cp "$psidir/cpu" "$psidir/memory"; cp "$psidir/cpu" "$psidir/io"
+psiout=$(WSLPS_PSI_DIR="$psidir" "$WSLPS")
+case "$psiout" in
+  *"all clear"*) pass "quiet psi leaves the report clear" ;;
+  *)             fail "quiet psi leaves the report clear" ;;
+esac
+rm -rf "$psidir"
+
 group "the dashboard degrades without a terminal"
 # no tty here, so dash must fall back to the plain repeating report and print
 # something rather than sitting on a keyboard that will never arrive
@@ -69,6 +97,7 @@ rejects "kill with no args" "$WSLPS" kill
 rejects "non-numeric pid"   "$WSLPS" kill pid abc
 rejects "unused port"       "$WSLPS" port 65999
 rejects "non-numeric dash interval" "$WSLPS" dash xyz
+rejects "unknown project"   "$WSLPS" kill project __no_such_project__ -y
 
 group "version bumper rejects malformed versions"
 for v in 1.2 1.2.3.4 1.2.3.4.5 sideways 1..3 01.2.3 1.02.3 2.0.08 ""; do
