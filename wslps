@@ -604,6 +604,7 @@ SNAP_ROWS=""
 POINTER=">"
 OUT=()
 VIEW_ROWS=(); VIEW_PIDS=(); VIEW_PORTS=(); VIEW_HDR=""
+OVER_PORTS=(); OVER_GROUPS=(); HDR_PORTS=""; HDR_GROUPS=""
 # read through a nameref in push_hist and _spark, which shellcheck cannot see
 # shellcheck disable=SC2034
 HIST_RAM=() HIST_CPU=() HIST_SWP=()
@@ -717,14 +718,22 @@ dash_sample() {
 # ---- row builders ---------------------------------------------------------
 # each fills VIEW_ROWS (rendered) plus VIEW_PIDS / VIEW_PORTS (parallel keys)
 dash_build() {
-  VIEW_ROWS=(); VIEW_PIDS=(); VIEW_PORTS=()
+  VIEW_ROWS=(); VIEW_PIDS=(); VIEW_PORTS=(); OVER_PORTS=(); OVER_GROUPS=()
   case "$DASH_VIEW" in
     ports)  VIEW_HDR=$(dash_hdr_ports) ;;
     groups) VIEW_HDR=$(dash_hdr_groups) ;;
     *)      VIEW_HDR=$(dash_hdr_proc) ;;
   esac
+  if [ "$DASH_VIEW" = overview ]; then
+    # the same three blocks the one-shot report prints, in the same order
+    local praw
+    HDR_PORTS=$(dash_hdr_ports); HDR_GROUPS=$(dash_hdr_groups)
+    praw=$(dash_port_raw)
+    [ -n "${praw//[[:space:]]/}" ] && mapfile -t OVER_PORTS < <(dash_port_fmt "$praw")
+    mapfile -t OVER_GROUPS < <(dash_group_lines)
+  fi
   case "$DASH_VIEW" in
-    overview) dash_rows_proc 10 ;;
+    overview) dash_rows_proc 15 ;;
     procs)    dash_rows_proc 0 ;;
     idle)     dash_rows_idle ;;
     ports)    dash_rows_ports ;;
@@ -815,15 +824,18 @@ dash_hdr_proc() {
   fi
 }
 
-dash_rows_ports() {
-  local rows
-  rows=$(ss -tlnpH | awk '
+# the raw "port<TAB>pid" list, and the formatter that joins it to the sample -
+# split apart so the overview can render the same rows without the selection
+dash_port_raw() {
+  ss -tlnpH | awk '
     { n = split($4, a, ":"); p = a[n]; pid = ""
       if (match($0, /pid=[0-9]+/)) pid = substr($0, RSTART + 4, RLENGTH - 4)
       k = p "/" pid; if (k in seen) next; seen[k] = 1
-      printf "%s\t%s\n", p, pid }' | sort -n -u)
-  [ -z "${rows//[[:space:]]/}" ] && return 0
-  mapfile -t VIEW_ROWS < <(printf '%s\n%s\n' "$SNAP_ROWS" "$rows" | awk -F'\t' \
+      printf "%s\t%s\n", p, pid }' | sort -n -u
+}
+
+dash_port_fmt() {
+  printf '%s\n%s\n' "$SNAP_ROWS" "$1" | awk -F'\t' \
     -v CD="$C_DIM" -v C0="$C_0" -v CG="$C_G" -v CY="$C_Y" -v W="$TCOLS" "$AWKLIB"'
     NF > 3 { rss[$1] = $2; args[$1] = $7; cpu[$1] = $9 + 0; next }
     { pid = $2
@@ -832,16 +844,23 @@ dash_rows_ports() {
       printf "%s%7s%s %s%8s%s %s%8s%s %s%5.1f%%%s  %s\n",
         CG, $1, C0, CD, (pid == "" ? "-" : pid), C0,
         CY, (pid in rss ? hum(rss[pid]) : "-"), C0,
-        CD, (pid in cpu ? cpu[pid] : 0), C0, cmd }')
-  mapfile -t VIEW_PIDS  < <(printf '%s\n' "$rows" | cut -f2)
-  mapfile -t VIEW_PORTS < <(printf '%s\n' "$rows" | cut -f1)
+        CD, (pid in cpu ? cpu[pid] : 0), C0, cmd }'
+}
+
+dash_rows_ports() {
+  local rows
+  rows=$(dash_port_raw)
+  [ -z "${rows//[[:space:]]/}" ] && return 0
+  mapfile -t VIEW_ROWS   < <(dash_port_fmt "$rows")
+  mapfile -t VIEW_PIDS   < <(printf '%s\n' "$rows" | cut -f2)
+  mapfile -t VIEW_PORTS  < <(printf '%s\n' "$rows" | cut -f1)
   return 0
 }
 
 dash_hdr_ports() { printf '%7s %8s %8s %6s  %s' PORT PID RAM "CPU%" PROCESS; }
 
-dash_rows_groups() {
-  mapfile -t VIEW_ROWS < <(printf '%s\n' "$SNAP_ROWS" | awk -F'\t' -v ORDER="$WS_GROUPS" \
+dash_group_lines() {
+  printf '%s\n' "$SNAP_ROWS" | awk -F'\t' -v ORDER="$WS_GROUPS" \
     -v CD="$C_DIM" -v C0="$C_0" -v CC="$C_C" -v CG="$C_G" -v CY="$C_Y" \
     -v BLKS="$(IFS=,; printf '%s' "${BLK[*]}")" -v EMPTY="$BAR_EMPTY" "$AWKLIB"'
     { n[$6]++; r[$6] += $2; s[$6] += $3; c[$6] += $9; tr += $2; tn++ }
@@ -862,7 +881,11 @@ dash_rows_groups() {
           CC, g, C0, CD, n[g], C0, CG, hum(r[g]), C0,
           CY, (s[g] > 0 ? hum(s[g]) : "-"), C0, CD, c[g], C0, CG, b, C0
       }
-    }')
+    }'
+}
+
+dash_rows_groups() {
+  mapfile -t VIEW_ROWS < <(dash_group_lines)
   return 0
 }
 
@@ -960,16 +983,68 @@ dash_help_panel() {
   return 0
 }
 
+# Lay out the overview's ports and groups blocks and leave what is left for
+# the process list in PROC_BUDGET. Sections give up rows to the process list
+# rather than pushing it off the bottom - groups first, then ports.
+PROC_BUDGET=3
+dash_overview_head() {
+  local avail=$1 before=${#OUT[@]} pn gn i guard=0 cost
+  pn=${#OVER_PORTS[@]}; [ "$pn" -gt 5 ] && pn=5
+  gn=${#OVER_GROUPS[@]}; [ "$gn" -gt 5 ] && gn=5
+  # A section costs its rows plus a title, a column header, a trailing blank
+  # and, when it is trimmed, one "... more" line. Count that exactly: guessing
+  # low pushes the footer off the bottom of a short window.
+  while : ; do
+    cost=2
+    [ "$pn" -gt 0 ] && cost=$(( cost + pn + 3 + (${#OVER_PORTS[@]} > pn ? 1 : 0) ))
+    [ "$gn" -gt 0 ] && cost=$(( cost + gn + 3 + (${#OVER_GROUPS[@]} > gn ? 1 : 0) ))
+    [ $(( avail - cost )) -ge 3 ] && break
+    if   [ "$gn" -gt 0 ]; then gn=$(( gn - 1 ))
+    elif [ "$pn" -gt 0 ]; then pn=$(( pn - 1 ))
+    else break
+    fi
+    guard=$(( guard + 1 )); [ "$guard" -gt 24 ] && break
+  done
+
+  if [ "$pn" -gt 0 ]; then
+    dash_line " ${C_B}LISTENING PORTS${C_0}"
+    dash_line "  ${C_DIM}${HDR_PORTS}${C_0}"
+    for (( i = 0; i < pn; i++ )); do dash_line "  ${OVER_PORTS[i]}"; done
+    [ "${#OVER_PORTS[@]}" -gt "$pn" ] &&
+      dash_line "  ${C_DIM}... $(( ${#OVER_PORTS[@]} - pn )) more, press 4${C_0}"
+    dash_line ""
+  fi
+  if [ "$gn" -gt 0 ]; then
+    dash_line " ${C_B}GROUPS${C_0}"
+    dash_line "  ${C_DIM}${HDR_GROUPS}${C_0}"
+    for (( i = 0; i < gn; i++ )); do dash_line "  ${OVER_GROUPS[i]}"; done
+    [ "${#OVER_GROUPS[@]}" -gt "$gn" ] &&
+      dash_line "  ${C_DIM}... $(( ${#OVER_GROUPS[@]} - gn )) more, press 5${C_0}"
+    dash_line ""
+  fi
+  # what is left after the blocks, minus the two lines dash_render still owes
+  # the process list (its title and its column header)
+  PROC_BUDGET=$(( avail - (${#OUT[@]} - before) - 2 ))
+  [ "$PROC_BUDGET" -lt 3 ] && PROC_BUDGET=3
+  return 0
+}
+
 dash_render() {
   OUT=()
   dash_header
   if [ "$DASH_HELP" = 1 ]; then dash_help_panel; dash_paint; return 0; fi
 
   local n=${#VIEW_ROWS[@]} body i mark
-  [ "$DASH_VIEW" = overview ] && dash_line " ${C_B}TOP BY ${DASH_SORT^^}${C_0}"
-  dash_line "  ${C_DIM}${VIEW_HDR}${C_0}"
-
-  body=$(( TROWS - ${#OUT[@]} - 3 )); [ "$body" -lt 3 ] && body=3
+  if [ "$DASH_VIEW" = overview ]; then
+    dash_overview_head $(( TROWS - ${#OUT[@]} - 3 ))
+    dash_line " ${C_B}TOP BY ${DASH_SORT^^}${C_0}"
+    dash_line "  ${C_DIM}${VIEW_HDR}${C_0}"
+    body=$PROC_BUDGET
+  else
+    dash_line "  ${C_DIM}${VIEW_HDR}${C_0}"
+    body=$(( TROWS - ${#OUT[@]} - 3 ))
+  fi
+  [ "$body" -lt 3 ] && body=3
   [ "$DASH_SEL" -lt "$DASH_TOP" ] && DASH_TOP=$DASH_SEL
   [ "$DASH_SEL" -ge $(( DASH_TOP + body )) ] && DASH_TOP=$(( DASH_SEL - body + 1 ))
   [ "$DASH_TOP" -lt 0 ] && DASH_TOP=0

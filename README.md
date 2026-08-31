@@ -96,27 +96,46 @@ Flags: `-y` skip confirmation, `-9` SIGKILL instead of SIGTERM, `-d` dry run.
 ### `wslps dash` is the live view
 
 ```
- ⠋ WSLPS overview   Mon 31 Aug 13:15:17  up 6h10m  every 2s
- RAM ██████████▋░░░░░░░░░░░░░░░   41%     4.0G of 9.7G     ▃▃
- SWP ██████▋░░░░░░░░░░░░░░░░░░░   26%     2.0G of 8.0G     ▂▂
- CPU ▊░░░░░░░░░░░░░░░░░░░░░░░░░    3% load 1.74 3.63 2.69 on 8 cores ▁▁
+ ⠏ WSLPS overview   Mon 31 Aug 13:44:22  up 6h39m  every 2s
+ RAM █████████████▏░░░░░░░░░░░░   51%     4.9G of 9.7G     ▄▄
+ SWP ██████▌░░░░░░░░░░░░░░░░░░░   25%     2.0G of 8.0G     ▂▂
+ CPU █░░░░░░░░░░░░░░░░░░░░░░░░░    4% load 0.30 0.70 0.94 on 8 cores ▁▁
  all clear
+
+ LISTENING PORTS
+     PORT      PID      RAM   CPU%  PROCESS
+       53        -        -   0.0%  (another user - run: sudo wslps ports)
+     3111    76147     1.7G   0.0%  next-server (v15.5.12)
+     5432        -        -   0.0%  (another user - run: sudo wslps ports)
+     9009    69952    72.6M   0.0%  node ~/.npm/_npx/6ddf87659f2ad8a4/node_modules/.bin/mcp-ser...
+
+ GROUPS
+  GROUP        COUNT       RAM     SWAP   CPU%  SHARE
+  dev-server       4      2.0G        -   0.0%  ███████░░░░░░░░░░░░░░░░░
+  browser         26      1.5G     535M  11.5%  ██████░░░░░░░░░░░░░░░░░░
+  ai-agent         5      1.5G     162M  10.0%  █████░░░░░░░░░░░░░░░░░░░
+  mcp             31      922M     1.2G   0.0%  ███░░░░░░░░░░░░░░░░░░░░░
+  node             2      223M        -   0.0%  █░░░░░░░░░░░░░░░░░░░░░░░
+  ... 2 more, press 5
 
  TOP BY RSS
       PID      RAM             SWAP   CPU%         UPTIME GROUP      COMMAND
-❯   76147     1.6G ████████       -   0.0% ░░░░░      17m dev-server next-server (v15.5.12)
-    69791     496M ██░░░░░░       -   6.0% █████      25m ai-agent   claude
-      783     378M ██░░░░░░   80.5M   2.5% ██░░░    6h04m ai-agent   claude
-    22975     300M █░░░░░░░   91.7M   2.0% ██░░░    3h56m ai-agent   claude
-    64879     260M █░░░░░░░       -   5.5% █████      43m ai-agent   codex
-    76121     165M █░░░░░░░       -   0.0% ░░░░░      17m dev-server node ~/projects/budget-...
-    76084     155M █░░░░░░░       -   0.0% ░░░░░      17m node       pnpm dev
-    69936     143M █░░░░░░░       -   0.0% ░░░░░      25m mcp        chrome-devtools-mcp
-    76337     133M █░░░░░░░       -   0.0% ░░░░░      16m dev-server node ~/projects/budget-...
-    69935     108M █░░░░░░░       -   0.0% ░░░░░      25m mcp        node ~/.npm/_npx/9833c1...
+❯   76147     1.7G ████████       -   0.0% ░░░░░      46m dev-server next-server (v15.5.12)
+    69791     512M ██░░░░░░       -   4.0% ███░░      54m ai-agent   claude
+      783     407M ██░░░░░░   71.0M   5.5% █████    6h33m ai-agent   claude
+    22975     300M █░░░░░░░   91.5M   0.5% ░░░░░    4h25m ai-agent   claude
+   119207     259M █░░░░░░░       -   6.0% █████       1m browser    node ~/projects/budget-...
+    64879     255M █░░░░░░░       -   0.0% ░░░░░    1h12m ai-agent   codex
+   119255     187M █░░░░░░░       -   0.5% ░░░░░       1m browser    chrome-headless-shell -...
+  ... 8 more
 
  up/dn move  x kill  t tree  s sort:rss  / filter  1-5 views  + - rate  p pause  ? help  q quit
 ```
+
+The overview is the one-shot report, live: the same ports, groups and top
+processes blocks, in the same order. Each block gives up rows to the one below
+it as the window gets shorter, so nothing is ever cut off the bottom - press
+`4` or `5` to see a trimmed block in full.
 
 It samples every couple of seconds and animates between samples, so a bar
 moving is a real change rather than a screen that blinked. The three sparklines
