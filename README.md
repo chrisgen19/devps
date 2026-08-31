@@ -310,6 +310,9 @@ Two different questions, one list:
   considered: plenty of system daemons sit at ppid 1 by design and are not
   abandoned at all
 
+The dashboard's idle view (key `3`) runs the same predicate and shows the same
+`WHY` column, so the two never disagree about what counts as a kill candidate.
+
 ### `wslps swap` shows who is actually paged out
 
 The process making your machine feel slow is usually not the one at the top of `htop`.
