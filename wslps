@@ -729,22 +729,28 @@ snapshot_rate() {
   rm -f "$f"
 }
 
+# The idle/orphan predicate, shared by "wslps idle" and the dashboard's idle
+# view so the same question cannot get two answers. Input is snapshot columns
+# plus 11 = instant cpu%, which both callers produce; output appends a reason.
+# shellcheck disable=SC2016  # an awk program: $6 and friends are its fields
+IDLE_AWK='
+  { dev = ($6 ~ /^(dev-server|mcp|browser|node|webserver)$/)
+    # ppid 1 means the shell that started it has gone. Restricted to the groups
+    # you start by hand: plenty of system daemons live at ppid 1 by design and
+    # are not "left behind" at all.
+    orphan = ($9 == 1 && $2 > 20000 && (dev || $6 == "ai-agent"))
+    idle   = (dev && $4 > 1200 && $11 < 1.0 && $2 > 20000)
+    if (!orphan && !idle) next
+    print $0, (orphan && idle) ? "idle+orphan" : (orphan ? "orphan" : "idle") }
+'
+
 idle_cmd() {
   printf '%sIDLE - alive a while, doing nothing, or left behind (kill candidates)%s\n' "$C_B" "$C_0"
   printf '  %sidle: up > 20 min, CPU < 1%% right now, RAM > 20M%s\n' "$C_DIM" "$C_0"
   printf '  %sorphan: its parent is gone, so nobody is watching it any more%s\n' "$C_DIM" "$C_0"
   local rows
   WS_IO=0
-  rows=$(snapshot_rate 0.3 | awk -F'\t' -v OFS='\t' '
-    { dev = ($6 ~ /^(dev-server|mcp|browser|node|webserver)$/)
-      # ppid 1 means the shell that started it has gone. Restricted to the
-      # groups you start by hand: plenty of system daemons live at ppid 1 by
-      # design and are not "left behind" at all.
-      orphan = ($9 == 1 && $2 > 20000 && (dev || $6 == "ai-agent"))
-      idle   = (dev && $4 > 1200 && $11 < 1.0 && $2 > 20000)
-      if (!orphan && !idle) next
-      print $0, (orphan && idle) ? "idle+orphan" : (orphan ? "orphan" : "idle") }' \
-    | sort -t$'\t' -k2,2nr)
+  rows=$(snapshot_rate 0.3 | awk -F'\t' -v OFS='\t' "$IDLE_AWK" | sort -t$'\t' -k2,2nr)
   if [ -z "${rows//[[:space:]]/}" ]; then
     printf '  %s(nothing obviously idle or orphaned)%s\n\n' "$C_DIM" "$C_0"; return
   fi
@@ -941,6 +947,7 @@ dash_build() {
     ports)    VIEW_HDR=$(dash_hdr_ports) ;;
     groups)   VIEW_HDR=$(dash_hdr_groups) ;;
     projects) VIEW_HDR=$(dash_hdr_projects) ;;
+    idle)     VIEW_HDR=$(dash_hdr_proc WHY) ;;
     *)        VIEW_HDR=$(dash_hdr_proc) ;;
   esac
   if [ "$DASH_VIEW" = overview ]; then
@@ -988,11 +995,12 @@ dash_rows_proc() {
 
 dash_rows_idle() {
   local rows
-  rows=$(printf '%s\n' "$SNAP_ROWS" | awk -F'\t' \
-    '$4 > 1200 && $5 < 1.0 && $2 > 20000 && $6 ~ /^(dev-server|mcp|browser|node|webserver)$/' \
+  # the same predicate the CLI uses: SNAP_ROWS already carries the instant cpu
+  # in column 11, so nothing here needs its own idea of what "idle" means
+  rows=$(printf '%s\n' "$SNAP_ROWS" | awk -F'\t' -v OFS='\t' "$IDLE_AWK" \
     | sort -t$'\t' -k2,2nr)
   [ -z "${rows//[[:space:]]/}" ] && return 0
-  mapfile -t VIEW_ROWS < <(printf '%s\n' "$rows" | dash_fmt_proc)
+  mapfile -t VIEW_ROWS < <(printf '%s\n' "$rows" | dash_fmt_proc why)
   mapfile -t VIEW_PIDS < <(printf '%s\n' "$rows" | cut -f1)
   return 0
 }
@@ -1000,7 +1008,7 @@ dash_rows_idle() {
 # rows never carry a leading marker column - dash_render owns that, so the
 # selection pointer cannot be eaten by a colour reset inside the row
 dash_fmt_proc() {
-  awk -F'\t' -v W="$TCOLS" -v CD="$C_DIM" -v C0="$C_0" -v CR="$C_R" -v CY="$C_Y" \
+  awk -F'\t' -v WHY="${1:-}" -v W="$TCOLS" -v CD="$C_DIM" -v C0="$C_0" -v CR="$C_R" -v CY="$C_Y" \
       -v CG="$C_G" -v CN="$C_NEW" -v GCOLS="$GCOLS_STR" \
       -v BLKS="$(IFS=,; printf '%s' "${BLK[*]}")" -v EMPTY="$BAR_EMPTY" "$AWKLIB"'
   function micro(v, mx, w,   f, s, i) {
@@ -1028,12 +1036,15 @@ dash_fmt_proc() {
       swc = (f[3] + 0 > 0) ? CY : CD
       io  = f[13] + 0
       ioc = (io > 1048576) ? CR : (io > 0) ? CY : CD
+      # the idle view answers "why is this here", every other view "what is it"
+      tag  = (WHY != "") ? f[14] : f[6]
+      tagc = (WHY == "") ? gcol(f[6]) : (f[14] ~ /orphan/ ? CR : CY)
       if (wide)
         printf "%s%7s%s %s%8s%s %s%s%s %s%7s%s %s%5.1f%%%s %s%8s%s %s%8s%s %s%-10s%s %s\n",
           pc, f[1], C0, rc, hum(f[2]), C0, rc, micro(f[2], mx, 8), C0,
           swc, sw, C0, cc, cpu, C0,
           ioc, (io > 0 ? hum(io / 1024) "/s" : "-"), C0,
-          CD, dur(f[4]), C0, gcol(f[6]), f[6], C0, shorten(f[7], cmdw)
+          CD, dur(f[4]), C0, tagc, tag, C0, shorten(f[7], cmdw)
       else
         printf "%s%7s%s %s%8s%s %s%7s%s %s%5.1f%%%s %s%8s%s %s\n",
           pc, f[1], C0, rc, hum(f[2]), C0, swc, sw, C0,
@@ -1043,8 +1054,9 @@ dash_fmt_proc() {
 }
 
 dash_hdr_proc() {
+  local last=${1:-GROUP}
   if [ "$TCOLS" -ge 108 ]; then
-    printf '%7s %8s %8s %7s %6s %8s %8s %-10s %s' PID RAM "" SWAP "CPU%" "IO/s" UPTIME GROUP COMMAND
+    printf '%7s %8s %8s %7s %6s %8s %8s %-10s %s' PID RAM "" SWAP "CPU%" "IO/s" UPTIME "$last" COMMAND
   else
     printf '%7s %8s %7s %6s %8s %s' PID RAM SWAP "CPU%" UPTIME COMMAND
   fi

@@ -100,6 +100,21 @@ kill "$deep_pid" 2>/dev/null || true
 wait "$deep_pid" 2>/dev/null || true
 rm -rf "$proj"
 
+group "the dashboard and the CLI share one idle predicate"
+# they answered the same question differently once: the CLI moved to an
+# instantaneous CPU sample and orphan detection while the dashboard kept the
+# old lifetime-average test. One definition, referenced twice.
+if [ "$(grep -c 'IDLE_AWK' "$WSLPS")" -ge 3 ]; then
+  pass "one predicate, referenced by both callers"
+else
+  fail "one predicate, referenced by both callers"
+fi
+if grep -q '[$]5 < 1.0' "$WSLPS"; then
+  fail "no caller still filters on the lifetime CPU average"
+else
+  pass "no caller still filters on the lifetime CPU average"
+fi
+
 group "idle classification"
 # ppid 1 plus a hand-started group is an orphan; system daemons at ppid 1 are
 # not. Drive the predicate directly: a real orphan cannot be conjured here,
