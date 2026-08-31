@@ -3,7 +3,7 @@
 # Dependencies: bash, procps, iproute2, awk. Nothing else.
 
 set -uo pipefail
-VERSION=2.0.0
+VERSION=2.1.0
 
 # ---------------------------------------------------------------- colour ----
 # UI_COLOR   0 plain, 1 sixteen colours, 2 two-hundred-and-fifty-six
