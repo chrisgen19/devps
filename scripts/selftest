@@ -48,12 +48,27 @@ ok "ports"        "$WSLPS" ports
 ok "group node"   "$WSLPS" group node
 ok "tree self"    "$WSLPS" tree $$
 
+group "the dashboard degrades without a terminal"
+# no tty here, so dash must fall back to the plain repeating report and print
+# something rather than sitting on a keyboard that will never arrive
+# pipefail is on, and timeout exits 124 when it does its job, so read the
+# output into a variable rather than testing the pipeline's status
+dash_out=$(timeout 3 "$WSLPS" dash 1 | head -3) || true
+if printf '%s' "$dash_out" | grep -q "WSL RESOURCES"; then
+  pass "dash falls back to a plain report over a pipe"
+else
+  fail "dash falls back to a plain report over a pipe"
+fi
+ok "ascii mode renders"   env WSLPS_ASCII=1 "$WSLPS" top 3
+ok "report with a fake dumb terminal" env TERM=dumb "$WSLPS" top 3
+
 group "bad input is rejected"
 rejects "unknown command"   "$WSLPS" bogus
 rejects "unknown group"     "$WSLPS" group nope
 rejects "kill with no args" "$WSLPS" kill
 rejects "non-numeric pid"   "$WSLPS" kill pid abc
 rejects "unused port"       "$WSLPS" port 65999
+rejects "non-numeric dash interval" "$WSLPS" dash xyz
 
 group "version bumper rejects malformed versions"
 for v in 1.2 1.2.3.4 1.2.3.4.5 sideways 1..3 01.2.3 1.02.3 2.0.08 ""; do

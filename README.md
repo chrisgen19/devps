@@ -77,7 +77,8 @@ ln -s "$PWD/wslps/wslps" ~/.local/bin/wslps
 | `wslps ports` | Everything listening |
 | `wslps port <n>` | Who owns port n, its project dir, its tree |
 | `wslps tree <pid>` | Process tree under a pid |
-| `wslps watch [secs]` | Live refresh, ctrl-c to quit (default 3) |
+| `wslps dash [secs]` | Live interactive dashboard, `q` to quit (default 2) |
+| `wslps watch [secs]` | Alias for `dash` |
 | `wslps help` | All of the above |
 
 ### Stopping
@@ -91,6 +92,88 @@ ln -s "$PWD/wslps/wslps" ~/.local/bin/wslps
 Flags: `-y` skip confirmation, `-9` SIGKILL instead of SIGTERM, `-d` dry run.
 
 ## The useful bits
+
+### `wslps dash` is the live view
+
+```
+ ⠏ WSLPS overview   Mon 31 Aug 13:44:22  up 6h39m  every 2s
+ RAM █████████████▏░░░░░░░░░░░░   51%     4.9G of 9.7G     ▄▄
+ SWP ██████▌░░░░░░░░░░░░░░░░░░░   25%     2.0G of 8.0G     ▂▂
+ CPU █░░░░░░░░░░░░░░░░░░░░░░░░░    4% load 0.30 0.70 0.94 on 8 cores ▁▁
+ all clear
+
+ LISTENING PORTS
+     PORT      PID      RAM   CPU%  PROCESS
+       53        -        -   0.0%  (another user - run: sudo wslps ports)
+     3111    76147     1.7G   0.0%  next-server (v15.5.12)
+     5432        -        -   0.0%  (another user - run: sudo wslps ports)
+     9009    69952    72.6M   0.0%  node ~/.npm/_npx/6ddf87659f2ad8a4/node_modules/.bin/mcp-ser...
+
+ GROUPS
+  GROUP        COUNT       RAM     SWAP   CPU%  SHARE
+  dev-server       4      2.0G        -   0.0%  ███████░░░░░░░░░░░░░░░░░
+  browser         26      1.5G     535M  11.5%  ██████░░░░░░░░░░░░░░░░░░
+  ai-agent         5      1.5G     162M  10.0%  █████░░░░░░░░░░░░░░░░░░░
+  mcp             31      922M     1.2G   0.0%  ███░░░░░░░░░░░░░░░░░░░░░
+  node             2      223M        -   0.0%  █░░░░░░░░░░░░░░░░░░░░░░░
+  ... 2 more, press 5
+
+ TOP BY RSS
+      PID      RAM             SWAP   CPU%         UPTIME GROUP      COMMAND
+❯   76147     1.7G ████████       -   0.0% ░░░░░      46m dev-server next-server (v15.5.12)
+    69791     512M ██░░░░░░       -   4.0% ███░░      54m ai-agent   claude
+      783     407M ██░░░░░░   71.0M   5.5% █████    6h33m ai-agent   claude
+    22975     300M █░░░░░░░   91.5M   0.5% ░░░░░    4h25m ai-agent   claude
+   119207     259M █░░░░░░░       -   6.0% █████       1m browser    node ~/projects/budget-...
+    64879     255M █░░░░░░░       -   0.0% ░░░░░    1h12m ai-agent   codex
+   119255     187M █░░░░░░░       -   0.5% ░░░░░       1m browser    chrome-headless-shell -...
+  ... 8 more
+
+ up/dn move  x kill  t tree  s sort:rss  / filter  1-5 views  + - rate  p pause  ? help  q quit
+```
+
+The overview is the one-shot report, live: the same ports, groups and top
+processes blocks, in the same order. Each block gives up rows to the one below
+it as the window gets shorter, so nothing is ever cut off the bottom - press
+`4` or `5` to see a trimmed block in full.
+
+It samples every couple of seconds and animates between samples, so a bar
+moving is a real change rather than a screen that blinked. The three sparklines
+on the right are the last 32 samples on a fixed 0-100% scale, so a flat 40% RAM
+looks flat instead of pegged.
+
+What it shows that the one-shot report cannot:
+
+- **real CPU per process** - the delta in `/proc/<pid>/stat` between two
+  samples, not the lifetime average `ps` reports, so a process that was busy an
+  hour ago no longer looks busy now
+- **new processes** - a pid that appeared since the last sample is highlighted
+- **a colour per group** - `mcp` red, `ai-agent` orange, `dev-server` azure,
+  `browser` blue, `editor` violet, `database` gold, `webserver` teal, `node`
+  green, `other` grey. The same colour follows a group into every table, in the
+  dashboard and in the one-shot report; `wslps help` prints the legend
+- **the same five views** you already have as commands, on keys `1`-`5`
+
+| Key | Does |
+| --- | --- |
+| `1` `2` `3` `4` `5`, `tab` | Overview, processes, idle, ports, groups |
+| arrows or `j` `k`, `pgup` `pgdn` | Move the selection |
+| `s` | Sort by RAM, CPU, swap or uptime |
+| `/` | Filter on command, pid or group (empty line clears it) |
+| `x` | Stop the selection - `X` for SIGKILL |
+| `t` | Process tree for the selection |
+| `p` `r` | Pause sampling, resample now |
+| `+` `-` | Refresh interval |
+| `?` `q` | Help, quit |
+
+`x` and `t` drop out of the dashboard and run the ordinary `wslps kill` and
+`wslps tree`, so the preview, the confirmation and every guard below still
+apply. The dashboard itself never signals anything.
+
+Colour and block glyphs turn themselves off when the output is not a terminal,
+when `NO_COLOR` is set, or when the locale is not UTF-8. `WSLPS_ASCII=1` keeps
+the colour but draws with `#` and `.`. Over a pipe, `wslps dash` falls back to
+reprinting the plain report on a timer.
 
 ### `wslps port <n>` finds the project, not just the process
 
