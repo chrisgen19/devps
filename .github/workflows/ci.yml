@@ -23,20 +23,20 @@ jobs:
           shellcheck --version
 
       - name: shellcheck
-        run: shellcheck --severity=style --format=gcc wslps scripts/bump scripts/selftest
+        run: shellcheck --severity=style --format=gcc devps scripts/bump scripts/selftest
 
       - name: Parse check
         run: |
-          bash -n wslps
+          bash -n devps
           bash -n scripts/bump
           bash -n scripts/selftest
 
       - name: Executable bit is committed
         run: |
-          mode=$(git ls-files -s wslps | awk '{print $1}')
+          mode=$(git ls-files -s devps | awk '{print $1}')
           echo "mode=$mode"
           if [ "$mode" != "100755" ]; then
-            echo "::error::wslps must be committed executable (100755), found $mode"
+            echo "::error::devps must be committed executable (100755), found $mode"
             exit 1
           fi
 
@@ -47,6 +47,29 @@ jobs:
       NO_COLOR: "1"
     steps:
       - uses: actions/checkout@v4
+
+      - name: Self test
+        run: ./scripts/selftest
+
+  smoke-macos:
+    name: smoke test (macOS)
+    runs-on: macos-latest
+    env:
+      NO_COLOR: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      # macOS ships bash 3.2, which has no declare -A, mapfile or EPOCHREALTIME.
+      # coreutils is only for gtimeout, which the dash fallback test wants.
+      - name: Install bash 5 and coreutils
+        run: |
+          brew install bash coreutils
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+
+      - name: Bash version in use
+        run: |
+          which -a bash
+          bash --version | head -1
 
       - name: Self test
         run: ./scripts/selftest

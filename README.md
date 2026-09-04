@@ -1,10 +1,16 @@
-# wslps
+# devps
 
-[![ci](https://github.com/chrisgen19/wslps/actions/workflows/ci.yml/badge.svg)](https://github.com/chrisgen19/wslps/actions/workflows/ci.yml)
+[![ci](https://github.com/chrisgen19/devps/actions/workflows/ci.yml/badge.svg)](https://github.com/chrisgen19/devps/actions/workflows/ci.yml)
 
-See what is running inside your WSL2 instance, what it actually costs, and stop it safely.
+See what your dev machine is running, what it actually costs, and stop it safely.
 
 A single dependency-free bash script. No install step beyond dropping it on your `PATH`.
+
+> **Renamed from `wslps`.** It started as a WSL2 tool, and the name stopped
+> being true once it ran on macOS. `wslps` still works as a symlink or an
+> alias: the script reads its own name from `$0`, so invoked that way it still
+> calls itself `wslps` in its own help and errors. The old repository URL
+> redirects, and releases carry a `wslps` asset for a few versions yet.
 
 ```
  WSL RESOURCES  Fri 28 Aug 15:19  up 5 hours, 15 minutes
@@ -14,7 +20,7 @@ A single dependency-free bash script. No install step beyond dropping it on your
   LOAD   ##......................   7%   0.58 / 1.58 / 13.28  across 8 cores
 
   ! swap is 99% full - the box is paging heavily
-  try: wslps idle    then: wslps kill port <n>
+  try: devps idle    then: devps kill port <n>
 
 GROUPS
   GROUP         COUNT       RAM      SWAP
@@ -39,7 +45,7 @@ The usual tools do not help much here:
 - `htop` sorts by RAM, and the process eating your swap is often near the bottom of that list
 - `ps aux | grep node` returns fifty rows of identical-looking node processes
 
-`wslps` answers the question you actually have: **which of the things I started is costing me, and can I safely stop it.**
+`devps` answers the question you actually have: **which of the things I started is costing me, and can I safely stop it.**
 
 ### Pressure, not load average
 
@@ -49,16 +55,45 @@ disk. It is what the warnings are built on, because
 [load average counts uninterruptible tasks](https://lwn.net/Articles/759658/)
 and so cannot tell CPU contention from IO stall. Memory `full` pressure is the
 kernel's own definition of thrashing, which is exactly the state WSL2 lands in
-when it runs out of headroom. On a kernel without PSI, wslps falls back to the
+when it runs out of headroom. On a kernel without PSI, devps falls back to the
 old load-average and D-state guesses.
 
 The `SWAP` column is the point. A dev server you have not touched in five hours can be sitting on 2.9G of swap while showing under 1G of RAM, which makes it nearly invisible to every other tool.
 
+## Platforms
+
+| | Linux / WSL2 | macOS |
+| --- | --- | --- |
+| Processes, groups, RAM, uptime, load | yes | yes |
+| Ports, `port <n>`, `kill` and its guards | yes | yes |
+| Live dashboard | yes | yes |
+| Per-process **swap** | yes | no - Darwin compresses memory rather than swapping per process |
+| Per-process **disk IO** | yes | no - no readable per-process counter |
+| `STALL` / PSI pressure | yes, on a kernel that has it | no - falls back to load average |
+| `projects` | yes | not yet |
+| `doctor` | WSL2 only | not applicable |
+
+Where a number cannot be read honestly it is reported as absent rather than
+estimated: on macOS the `SWAP` column reads `-` on every row rather than a
+plausible-looking `0`, and `devps swap` says why instead of ranking a column of
+zeros and calling the result swap hogs. A wrong swap figure would be worse than
+a missing one.
+
+The swap column is why this exists on WSL2, and it is exactly the column macOS
+cannot provide. On a Mac the useful question is the narrower one: which of the
+six dev servers you started is holding four gigabytes.
+
 ## Install
 
+Needs **bash 4+**. macOS ships bash 3.2, so install a current one first:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/chrisgen19/wslps/main/wslps -o ~/.local/bin/wslps
-chmod +x ~/.local/bin/wslps
+brew install bash        # macOS only
+```
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/chrisgen19/devps/main/devps -o ~/.local/bin/devps
+chmod +x ~/.local/bin/devps
 ```
 
 Make sure `~/.local/bin` is on your `PATH`. If it is not, add this to `~/.zshrc` or `~/.bashrc`:
@@ -70,8 +105,14 @@ export PATH="$HOME/.local/bin:$PATH"
 Or clone and symlink:
 
 ```bash
-git clone https://github.com/chrisgen19/wslps.git
-ln -s "$PWD/wslps/wslps" ~/.local/bin/wslps
+git clone https://github.com/chrisgen19/devps.git
+ln -s "$PWD/devps/devps" ~/.local/bin/devps
+```
+
+Keeping the old name working, if you have it in your fingers:
+
+```bash
+ln -s ~/.local/bin/devps ~/.local/bin/wslps
 ```
 
 ## Commands
@@ -80,37 +121,37 @@ ln -s "$PWD/wslps/wslps" ~/.local/bin/wslps
 
 | Command | What it does |
 | --- | --- |
-| `wslps` | Full report: memory, ports, groups, top processes |
-| `wslps top [N]` | N biggest processes by RAM (default 15) |
-| `wslps swap [N]` | N biggest swap hogs (default 15) |
-| `wslps idle` | Processes doing nothing, or left behind by a closed shell |
-| `wslps projects` | What each project costs, and the ports it owns |
-| `wslps doctor` | Whether this WSL box is configured to survive your work |
-| `wslps group <name>` | Every process in one group |
-| `wslps ports` | Everything listening |
-| `wslps port <n>` | Who owns port n, its project dir, its tree |
-| `wslps tree <pid>` | Process tree under a pid |
-| `wslps dash [secs]` | Live interactive dashboard, `q` to quit (default 2) |
-| `wslps watch [secs]` | Alias for `dash` |
-| `wslps help` | All of the above |
+| `devps` | Full report: memory, ports, groups, top processes |
+| `devps top [N]` | N biggest processes by RAM (default 15) |
+| `devps swap [N]` | N biggest swap hogs (default 15) |
+| `devps idle` | Processes doing nothing, or left behind by a closed shell |
+| `devps projects` | What each project costs, and the ports it owns |
+| `devps doctor` | Whether this WSL box is configured to survive your work (WSL2 only) |
+| `devps group <name>` | Every process in one group |
+| `devps ports` | Everything listening |
+| `devps port <n>` | Who owns port n, its project dir, its tree |
+| `devps tree <pid>` | Process tree under a pid |
+| `devps dash [secs]` | Live interactive dashboard, `q` to quit (default 2) |
+| `devps watch [secs]` | Alias for `dash` |
+| `devps help` | All of the above |
 
 ### Stopping
 
 | Command | What it does |
 | --- | --- |
-| `wslps kill port <n>` | Stop whatever serves port n, plus its children |
-| `wslps kill pid <n>` | Stop one process plus its children |
-| `wslps kill group <name>` | Stop every process in a group |
-| `wslps kill project <name>` | Stop everything running in one project |
+| `devps kill port <n>` | Stop whatever serves port n, plus its children |
+| `devps kill pid <n>` | Stop one process plus its children |
+| `devps kill group <name>` | Stop every process in a group |
+| `devps kill project <name>` | Stop everything running in one project |
 
 Flags: `-y` skip confirmation, `-9` SIGKILL instead of SIGTERM, `-d` dry run.
 
 ## The useful bits
 
-### `wslps dash` is the live view
+### `devps dash` is the live view
 
 ```
- ⠏ WSLPS overview   Mon 31 Aug 13:44:22  up 6h39m  every 2s
+ ⠏ DEVPS overview   Mon 31 Aug 13:44:22  up 6h39m  every 2s
  RAM █████████████▏░░░░░░░░░░░░   51%     4.9G of 9.7G     ▄▄
  SWP ██████▌░░░░░░░░░░░░░░░░░░░   25%     2.0G of 8.0G     ▂▂
  CPU █░░░░░░░░░░░░░░░░░░░░░░░░░    4% load 0.30 0.70 0.94 on 8 cores ▁▁
@@ -118,9 +159,9 @@ Flags: `-y` skip confirmation, `-9` SIGKILL instead of SIGTERM, `-d` dry run.
 
  LISTENING PORTS
      PORT      PID      RAM   CPU%  PROCESS
-       53        -        -   0.0%  (another user - run: sudo wslps ports)
+       53        -        -   0.0%  (another user - run: sudo devps ports)
      3111    76147     1.7G   0.0%  next-server (v15.5.12)
-     5432        -        -   0.0%  (another user - run: sudo wslps ports)
+     5432        -        -   0.0%  (another user - run: sudo devps ports)
      9009    69952    72.6M   0.0%  node ~/.npm/_npx/6ddf87659f2ad8a4/node_modules/.bin/mcp-ser...
 
  GROUPS
@@ -168,7 +209,7 @@ What it shows that the one-shot report cannot:
 - **a colour per group** - `mcp` red, `ai-agent` orange, `dev-server` azure,
   `browser` blue, `editor` violet, `database` gold, `webserver` teal, `node`
   green, `other` grey. The same colour follows a group into every table, in the
-  dashboard and in the one-shot report; `wslps help` prints the legend
+  dashboard and in the one-shot report; `devps help` prints the legend
 - **the same five views** you already have as commands, on keys `1`-`5`
 
 | Key | Does |
@@ -183,23 +224,23 @@ What it shows that the one-shot report cannot:
 | `+` `-` | Refresh interval |
 | `?` `q` | Help, quit |
 
-`x` and `t` drop out of the dashboard and run the ordinary `wslps kill` and
-`wslps tree`, so the preview, the confirmation and every guard below still
+`x` and `t` drop out of the dashboard and run the ordinary `devps kill` and
+`devps tree`, so the preview, the confirmation and every guard below still
 apply. The dashboard itself never signals anything.
 
 Colour and block glyphs turn themselves off when the output is not a terminal,
-when `NO_COLOR` is set, or when the locale is not UTF-8. `WSLPS_ASCII=1` keeps
-the colour but draws with `#` and `.`. Over a pipe, `wslps dash` falls back to
+when `NO_COLOR` is set, or when the locale is not UTF-8. `DEVPS_ASCII=1` keeps
+the colour but draws with `#` and `.`. Over a pipe, `devps dash` falls back to
 reprinting the plain report on a timer.
 
-### `wslps projects` answers "which checkout is costing me"
+### `devps projects` answers "which checkout is costing me"
 
 ```
 PROJECTS (processes grouped by the project directory they run in)
    PROCS       RAM      SWAP  PORTS          PROJECT
       13      3.1G     72.6M  3111           ~/projects/budget-tracker-2026
       33      672M      1.3G  -              ~/ag-projects/whitelabel-sites
-       8     34.2M         -  -              ~/projects/wslps
+       8     34.2M         -  -              ~/projects/devps
       24      1.5G      437M  -              (not in a project)
       57      318M     22.1M  -              (cwd not readable - other users)
      135      5.6G      1.9G
@@ -215,10 +256,10 @@ whose working directory has no project marker above it; `(cwd not readable)` is
 another user's process, which the kernel will not let you inspect. Neither is
 guessed at.
 
-`wslps kill project <name>` stops everything in one checkout, with the same
+`devps kill project <name>` stops everything in one checkout, with the same
 preview, confirmation and guards as every other kill.
 
-### `wslps doctor` checks the box, not the processes
+### `devps doctor` checks the box, not the processes
 
 ```
 WSL DOCTOR (configuration, not processes - nothing here changes anything)
@@ -255,7 +296,7 @@ WSL DOCTOR (configuration, not processes - nothing here changes anything)
   edit /mnt/c/Users/253071.CDiomampo/.wslconfig then run: wsl --shutdown  (from Windows) to apply
 ```
 
-Everything else in wslps answers "what is running". This answers "is this
+Everything else in devps answers "what is running". This answers "is this
 instance set up to survive it", which is the question you have at 3am after the
 box has already fallen over:
 
@@ -272,7 +313,7 @@ box has already fallen over:
 
 It reads and reports. It changes nothing.
 
-### `wslps port <n>` finds the project, not just the process
+### `devps port <n>` finds the project, not just the process
 
 ```
 PORT 3111
@@ -280,12 +321,12 @@ PORT 3111
   command      : next-server (v15.5.12)
   started      : Fri Aug 28 12:40:37 2026
   project dir  : /home/you/projects/budget-tracker
-  server root  : 105283  <- what "wslps kill port 3111" targets
+  server root  : 105283  <- what "devps kill port 3111" targets
 ```
 
 It walks **up** from the socket holder to the top of the server, so `kill port 3111` takes the whole `pnpm dev` -> `sh -c next dev` -> `next-server` -> postcss workers chain instead of orphaning the wrapper. It stops climbing at a bare interactive shell, so it can never walk up into your terminal.
 
-### `wslps idle` is the "what did I forget about" view
+### `devps idle` is the "what did I forget about" view
 
 ```
 IDLE - alive a while, doing nothing, or left behind (kill candidates)
@@ -313,7 +354,7 @@ Two different questions, one list:
 The dashboard's idle view (key `3`) runs the same predicate and shows the same
 `WHY` column, so the two never disagree about what counts as a kill candidate.
 
-### `wslps swap` shows who is actually paged out
+### `devps swap` shows who is actually paged out
 
 The process making your machine feel slow is usually not the one at the top of `htop`.
 
@@ -365,14 +406,14 @@ Kernel threads are excluded.
 
 - **Group RAM totals over-count slightly.** Forked processes share pages that get counted once per process, so `TOTAL` sits a little above `free -h`. Treat the numbers as relative, not exact.
 - **`kill group` is broad by design.** `kill group ai-agent` can target fifty-plus processes. Preview with `-d`.
-- **`-9` skips cleanup.** Next dev servers flush caches on SIGTERM. Try the polite signal first; `wslps` only suggests `-9` if something ignored it.
-- **Ports owned by other users show `-` for pid.** Run `sudo wslps ports` to see them.
+- **`-9` skips cleanup.** Next dev servers flush caches on SIGTERM. Try the polite signal first; `devps` only suggests `-9` if something ignored it.
+- **Ports owned by other users show `-` for pid.** Run `sudo devps ports` to see them.
 - **`idle` costs 300ms.** It takes two snapshots to get a real CPU number, so it is slower than the other one-shot commands by exactly that gap.
 - **Orphan detection looks for ppid 1.** Under a process supervisor or an agent that makes itself a subreaper, an abandoned process is reparented to that instead of to init, and will not be flagged.
 - **`IO/s` only covers your own processes.** `/proc/<pid>/io` needs ptrace access; other users' processes report `-`. The read is skipped entirely for commands that do not show the column.
 - **`projects` can only see your own processes.** A working directory is readable for processes you own; anything else lands in the `(cwd not readable)` bucket rather than being guessed at.
 - **`doctor` needs Windows interop** for host RAM, the active Windows profile and the VHDX location. Without it, it falls back to searching for a `.wslconfig` and says so when more than one profile has one, and the VHDX is matched by distro name in the install path or reported as not located. It never pairs another distro's disk with this one's usage.
-- **PSI needs a kernel built with `CONFIG_PSI`.** Every current WSL2 kernel has it. Without it, wslps falls back to load average and the D-state count.
+- **PSI needs a kernel built with `CONFIG_PSI`.** Every current WSL2 kernel has it. Without it, devps falls back to load average and the D-state count.
 - Set `NO_COLOR=1` for plain output when piping or logging.
 
 ## Requirements
@@ -404,7 +445,7 @@ Verify the host side with `Get-CimInstance Win32_PageFileUsage` (active pagefile
 ## Development
 
 ```bash
-shellcheck --severity=style wslps scripts/bump scripts/selftest
+shellcheck --severity=style devps scripts/bump scripts/selftest
 scripts/selftest
 ```
 
