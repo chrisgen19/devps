@@ -241,7 +241,24 @@ function redact(s,   n, a, i, j, t, k, p, rest, slash, at, ui, c, out) {
 #
 # Returns "" when this is not a helper, which is every process that has no
 # --type= at all.
+# the outermost .app is the application; the nested bundle belongs to the
+# helper itself. Without one - Linux, where chrome is just a path - fall back
+# to the basename of the executable.
+function appname(s,   app) {
+  app = s
+  if (match(app, /\/[^\/]+\.app\//)) return substr(app, RSTART + 1, RLENGTH - 6)
+  sub(/[ \t].*/, "", app); sub(/^.*\//, "", app)
+  return app
+}
 function helper(s,   app, t, u, head) {
+  # The crash reporter is a helper too, but it takes no --type= - it spells the
+  # same thing as ptype= inside --monitor-self-annotation, which is not worth
+  # parsing. Name it from the binary instead. crashpad is Chromium and Electron
+  # specific, so the name alone is enough to recognise it.
+  if (s ~ /crashpad[_-]?handler/) {
+    app = appname(s)
+    return (app == "") ? "" : app " crashpad"
+  }
   # --type= has to be a whole argument. Without the boundary,
   # "--expected=--type=renderer" matches, and a greedy search would take the
   # last spelling in the line rather than the first real one.
@@ -258,12 +275,7 @@ function helper(s,   app, t, u, head) {
   if (head !~ /helper/ &&
       head !~ /(^|\/)(chrome|chromium|chromium-browser|electron|msedge|brave|brave-browser|opera|vivaldi)( |$)/) return ""
   sub(/-process$/, "", t)                    # gpu-process reads better as gpu
-  # the outermost .app is the application; the nested bundle belongs to the
-  # helper itself. Without one - Linux, where chrome is just a path - fall back
-  # to the basename of the executable.
-  app = s
-  if (match(app, /\/[^\/]+\.app\//)) app = substr(app, RSTART + 1, RLENGTH - 6)
-  else { sub(/[ \t].*/, "", app); sub(/^.*\//, "", app) }
+  app = appname(s)
   if (app == "") return ""
   # network.mojom.NetworkService is the useful half of a utility process
   if (t == "utility" && match(s, /--utility-sub-type=[A-Za-z0-9._]+/)) {
