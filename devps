@@ -1488,7 +1488,7 @@ dash_footer() {
       *)
         keys="${C_ACC}tab${C_0} next view" ;;
     esac
-    tail="  ${C_ACC}1-6${C_0} views  ${C_ACC}+ -${C_0} rate  ${C_ACC}p${C_0} pause  ${C_ACC}?${C_0} help  ${C_ACC}q${C_0} quit"
+    tail="  ${C_ACC}$(dash_keyspan)${C_0} views  ${C_ACC}+ -${C_0} rate  ${C_ACC}p${C_0} pause  ${C_ACC}?${C_0} help  ${C_ACC}q${C_0} quit"
   else
     case "$DASH_VIEW" in
       overview|procs|idle)
@@ -1498,7 +1498,7 @@ dash_footer() {
       *)
         keys="${C_ACC}tab${C_0} view" ;;
     esac
-    tail="  ${C_ACC}1-6${C_0} views  ${C_ACC}?${C_0} help  ${C_ACC}q${C_0} quit"
+    tail="  ${C_ACC}$(dash_keyspan)${C_0} views  ${C_ACC}?${C_0} help  ${C_ACC}q${C_0} quit"
   fi
   OUT+=("")
   OUT+=(" ${C_DIM}${keys}${tail}${C_0}")
@@ -1638,6 +1638,14 @@ dash_resize() {
 
 # the number keys name views directly, so an unavailable one is refused here
 # rather than in six places
+# "1-6" or "1-5", and the view names in key order - help text that is derived
+# from DASH_VIEWS rather than restating it cannot advertise a dead key
+dash_keyspan() { local -a v; read -ra v <<< "$DASH_VIEWS"; printf '1-%d' "${#v[@]}"; }
+dash_viewlist() {
+  local -a v; read -ra v <<< "$DASH_VIEWS"
+  printf '%s' "overview, processes, idle, ports, groups${v[5]+, projects}"
+}
+
 dash_goto() {
   case " $DASH_VIEWS " in *" $1 "*) ;; *) return 0 ;; esac
   DASH_VIEW="$1"; DASH_SEL=0; DASH_TOP=0; dash_build
@@ -2223,6 +2231,8 @@ find_vhdx() {
 
 # ------------------------------------------------------------------- help ----
 usage() {
+  local proj_note=""
+  [ "$WS_PLATFORM" = linux ] || proj_note="   ${C_DIM}(Linux only)${C_0}"
   cat <<EOF
 ${C_B}$PROG${C_0} v$VERSION - what this machine is running, and what it costs
 
@@ -2234,7 +2244,7 @@ ${C_B}LOOKING${C_0}
   ${C_C}$PROG top${C_0} [N]              N biggest processes by RAM        (default 15)
   ${C_C}$PROG swap${C_0} [N]             N biggest swap hogs               (default 15)
   ${C_C}$PROG idle${C_0}                 processes doing nothing, or left behind by a closed shell
-  ${C_C}$PROG projects${C_0}             what each project costs, and the ports it owns
+  ${C_C}$PROG projects${C_0}             what each project costs, and the ports it owns$proj_note
   ${C_C}$PROG doctor${C_0}               is this WSL box configured to survive your work
   ${C_C}$PROG group${C_0} <name>         every process in one group
   ${C_C}$PROG ports${C_0}                everything listening
@@ -2257,7 +2267,7 @@ ${C_B}STOPPING${C_0}
   ${C_DIM}-d${C_0}   dry run - show the victims, kill nothing
 
 ${C_B}DASHBOARD${C_0} ${C_DIM}($PROG dash)${C_0}
-  ${C_C}1-6${C_0} overview, processes, idle, ports, groups, projects   ${C_C}tab${C_0} cycle
+  ${C_C}$(dash_keyspan)${C_0} $(dash_viewlist)   ${C_C}tab${C_0} cycle
   ${C_C}up down${C_0} move   ${C_C}s${C_0} sort   ${C_C}/${C_0} filter   ${C_C}t${C_0} tree
   ${C_C}x${C_0} stop the selection (asks first)   ${C_C}X${C_0} same with SIGKILL
   ${C_C}p${C_0} pause   ${C_C}+ -${C_0} refresh rate   ${C_C}?${C_0} help   ${C_C}q${C_0} quit
@@ -2272,7 +2282,6 @@ ${C_B}GROUPS${C_0}
 
 ${C_B}EXAMPLES${C_0}
   $PROG dash                  the live dashboard - watch RAM move, kill from it
-  $PROG projects              which checkout is costing you, not which process
   $PROG doctor                why the box died at 3am (memory cap, disk, 9P)
   $PROG swap                  who is paged out - the real cause of slowness
   $PROG idle                  the dev servers you forgot about, and the orphans

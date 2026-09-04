@@ -208,6 +208,32 @@ case "$alias_ver" in
 esac
 rm -rf "$alias_dir"
 
+group "help does not advertise what this platform cannot do"
+# the key span and the view list are derived from DASH_VIEWS, so this catches
+# help drifting away from what the number keys actually do
+help_out=$("$DEVPS" help)
+if [ "$PLAT" = Linux ]; then
+  case "$help_out" in
+    *"1-6 overview, processes, idle, ports, groups, projects"*)
+      pass "help offers all six dashboard views" ;;
+    *) fail "help offers all six dashboard views" ;;
+  esac
+else
+  case "$help_out" in
+    *"1-5 overview, processes, idle, ports, groups"*)
+      pass "help offers five dashboard views, not six" ;;
+    *) fail "help offers five dashboard views, not six" ;;
+  esac
+  case "$help_out" in
+    *"projects"*"(Linux only)"*) pass "help marks projects Linux only" ;;
+    *)                           fail "help marks projects Linux only" ;;
+  esac
+  case "$help_out" in
+    *"1-6"*) fail "help still advertises a sixth view" ;;
+    *)       pass "help does not advertise a sixth view" ;;
+  esac
+fi
+
 group "bad input is rejected"
 rejects "unknown command"   "$DEVPS" bogus
 rejects "unknown group"     "$DEVPS" group nope
