@@ -2261,7 +2261,8 @@ report() {
   ports_table
   group_table
   proc_table "TOP PROCESSES" "${1:-12}" rss "" 1
-  printf '%s  $PROG help for commands - nothing above changed anything.%s\n' "$C_DIM" "$C_0"
+  printf '%s  %s help for commands - nothing above changed anything.%s\n' \
+    "$C_DIM" "$PROG" "$C_0"
 }
 
 # ------------------------------------------------------------------- main ----
