@@ -205,6 +205,12 @@ expect_short 'chrome renderer' '/opt/google/chrome/chrome --type=renderer --lang
 # and --type= belongs to plenty of things that are not helpers
 expect_short 'mount --type=ext4 /dev/sda1 /mnt' '/bin/mount --type=ext4 /dev/sda1 /mnt'
 expect_short 'node server.js --port 3000'       '/usr/bin/node server.js --port 3000'
+# a recognised type on a program that is not a browser: the type list alone is
+# not enough, the executable has to be a Chromium or Electron binary too
+expect_short 'node script.js --type=service' '/usr/bin/node script.js --type=service'
+# and --type= has to be a whole argument, not a substring of one
+expect_short 'mytool --expected=--type=renderer run' \
+             '/usr/bin/mytool --expected=--type=renderer run'
 
 group "group classification"
 # drive the real classifier out of the script rather than a copy of it, so this

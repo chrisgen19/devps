@@ -241,12 +241,22 @@ function redact(s,   n, a, i, j, t, k, p, rest, slash, at, ui, c, out) {
 #
 # Returns "" when this is not a helper, which is every process that has no
 # --type= at all.
-function helper(s,   app, t, u) {
-  if (s !~ /--type=/) return ""
-  t = s; sub(/^.*--type=/, "", t); sub(/[ \t].*/, "", t)
+function helper(s,   app, t, u, head) {
+  # --type= has to be a whole argument. Without the boundary,
+  # "--expected=--type=renderer" matches, and a greedy search would take the
+  # last spelling in the line rather than the first real one.
+  if (!match(s, /(^| )--type=[a-z-]+( |$)/)) return ""
+  t = substr(s, RSTART, RLENGTH); gsub(/^ ?--type=| $/, "", t)
   # only the process types Chromium actually uses, so that "mount --type=ext4"
   # and anything else that happens to spell --type= is left alone
   if (t !~ /^(renderer|gpu-process|utility|zygote|ppapi|ppapi-broker|plugin|broker|crashpad-handler|nacl-loader|service)$/) return ""
+  # and the program has to be one of these to begin with, or an ordinary tool
+  # that takes a --type flag gets rewritten: "node script.js --type=service"
+  # is not a renderer. Bundled helpers are always named Helper something; on
+  # Linux the renderer is the browser binary re-execing itself.
+  head = tolower(s); sub(/ --type=.*/, "", head)
+  if (head !~ /helper/ &&
+      head !~ /(^|\/)(chrome|chromium|chromium-browser|electron|msedge|brave|brave-browser|opera|vivaldi)( |$)/) return ""
   sub(/-process$/, "", t)                    # gpu-process reads better as gpu
   # the outermost .app is the application; the nested bundle belongs to the
   # helper itself. Without one - Linux, where chrome is just a path - fall back
