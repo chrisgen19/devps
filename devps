@@ -216,6 +216,20 @@ WS_GROUPS="mcp ai-agent dev-server browser editor database webserver node other"
 # .vscode-server directory under WSL and a Code Helper process bundle on macOS,
 # and Chrome is /opt/google/chrome on one and "Google Chrome.app" on the other.
 # The patterns are additive - both spellings live in the same branch.
+# [[DD-]HH:]MM:SS[.ss] -> seconds. Darwin's ps hands out both etime and time as
+# clock strings. The day component is added after the base-60 walk; folding it
+# into the accumulator multiplies it by 60 once per remaining field.
+AWKSECS='
+function secs(t,   d, p, n, v, i) {
+  d = 0
+  if (t ~ /-/) { split(t, p, "-"); d = p[1] + 0; t = p[2] }
+  n = split(t, p, ":")
+  v = 0
+  for (i = 1; i <= n; i++) v = v * 60 + (p[i] + 0)
+  return v + d * 86400
+}
+'
+
 AWKCAT='
 function cat(a,   l) {
   l = tolower(a)
@@ -532,15 +546,7 @@ snapshot_linux() {
 # memory instead of swapping per process, and exposes no readable per-process
 # block IO counter. Both are reported absent, not estimated.
 snapshot_darwin() {
-  ps -ww -eo pid=,ppid=,rss=,etime=,pcpu=,time=,args= -m | awk "$AWKCAT"'
-  function secs(t,   d, p, n, v, i) {
-    d = 0
-    if (t ~ /-/) { split(t, p, "-"); d = p[1] + 0; t = p[2] }
-    n = split(t, p, ":")
-    v = 0
-    for (i = 1; i <= n; i++) v = v * 60 + (p[i] + 0)
-    return v + d * 86400
-  }
+  ps -ww -eo pid=,ppid=,rss=,etime=,pcpu=,time=,args= -m | awk "$AWKCAT$AWKSECS"'
   {
     pid = $1; ppid = $2; rss = $3 + 0; et = secs($4); pc = $5 + 0
     tk = secs($6) * 100          # CLK_TCK is 100 on Darwin as it is on Linux
@@ -1077,11 +1083,8 @@ read_cpu() { "read_cpu_$WS_PLATFORM"; }
 CPU_PREV_US=0
 read_cpu_darwin() {
   local tot us dt_us cap d_tot
-  tot=$(ps -eo time= | awk '
-    { n = split($1, p, ":"); v = 0
-      if ($1 ~ /-/) { split($1, q, "-"); n = split(q[2], p, ":"); v = q[1] * 86400 }
-      for (i = 1; i <= n; i++) v = v * 60 + (p[i] + 0)
-      s += v }
+  tot=$(ps -eo time= | awk "$AWKSECS"'
+    { s += secs($1) }
     END { printf "%d", s * 100 }')
   us=${EPOCHREALTIME/[.,]/}
   dt_us=$(( us - CPU_PREV_US ))
@@ -1747,7 +1750,7 @@ dash_cmd() {
   exec 3< /dev/tty || { watch_plain "$interval"; return; }
 
   [ "$UI_UNICODE" = 1 ] && POINTER="❯"
-  CORES=$(nproc)
+  CORES=$(cpu_cores)
   CLK_TCK=$(getconf CLK_TCK) || CLK_TCK=100
   PREVF=$(mktemp -t devps.XXXXXX) || die "cannot create a temp file"
   : > "$PREVF"
@@ -1940,7 +1943,7 @@ projects_cmd() {
 # Every Windows-side lookup degrades to "unknown" rather than failing, so this
 # still runs on a plain Linux box or with interop turned off.
 
-is_wsl() { grep -qi microsoft /proc/version; }
+is_wsl() { [ "$WS_PLATFORM" = linux ] && grep -qi microsoft /proc/version; }
 
 DOC_FINDINGS=()
 finding() { DOC_FINDINGS+=("$1|$2"); }   # crit|warn|ok|tip , text
@@ -2255,6 +2258,19 @@ ${C_B}EXAMPLES${C_0}
 EOF
 }
 
+# Sorting by a column that is zero for every row is not a ranking, it is the
+# snapshot's own order wearing a SWAP HOGS heading. Say why instead.
+swap_cmd() {
+  if [ "$WS_PLATFORM" != linux ]; then
+    die "per-process swap is not available on $(uname -s).
+       It compresses memory rather than swapping per process, so there is no
+       per-pid figure to rank - the SWAP column reads - for the same reason.
+       try: $PROG top"
+  fi
+  header
+  proc_table "SWAP HOGS" "$1" swap "" 1
+}
+
 report() {
   SNAP=$(snapshot)
   header
@@ -2274,7 +2290,7 @@ case "$cmd" in
   version|-V)      echo "$PROG $VERSION" ;;
   report)          report "${1:-12}" ;;
   top)             header; proc_table "TOP PROCESSES" "${1:-15}" rss "" 1 ;;
-  swap)            header; proc_table "SWAP HOGS" "${1:-15}" swap "" 1 ;;
+  swap)            swap_cmd "${1:-15}" ;;
   idle)            idle_cmd ;;
   projects|proj)   header; projects_cmd ;;
   doctor|dr)       doctor_cmd ;;

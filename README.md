@@ -74,8 +74,10 @@ The `SWAP` column is the point. A dev server you have not touched in five hours 
 | `doctor` | WSL2 only | not applicable |
 
 Where a number cannot be read honestly it is reported as absent rather than
-estimated, and a column that is empty for every row hides itself. A wrong swap
-figure would be worse than a missing one.
+estimated: on macOS the `SWAP` column reads `-` on every row rather than a
+plausible-looking `0`, and `devps swap` says why instead of ranking a column of
+zeros and calling the result swap hogs. A wrong swap figure would be worse than
+a missing one.
 
 The swap column is why this exists on WSL2, and it is exactly the column macOS
 cannot provide. On a Mac the useful question is the narrower one: which of the

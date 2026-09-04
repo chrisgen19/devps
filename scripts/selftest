@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# selftest - assert wslps behaves, and that its kill guards still hold.
+# selftest - assert devps behaves, and that its kill guards still hold.
 #
 # Run it anywhere: it only ever signals throwaway processes it started itself.
 # Both the ci and release workflows call this, so a release cannot publish a
@@ -56,7 +56,11 @@ ok "version"      "$DEVPS" version
 ok "help"         "$DEVPS" help
 ok "report"       "$DEVPS"
 ok "top"          "$DEVPS" top 5
-ok "swap"         "$DEVPS" swap 5
+if [ "$PLAT" = Linux ]; then
+  ok "swap"       "$DEVPS" swap 5
+else
+  rejects "swap refuses rather than ranking zeros" "$DEVPS" swap 5
+fi
 ok "idle"         "$DEVPS" idle
 ok "ports"        "$DEVPS" ports
 ok "group node"   "$DEVPS" group node
@@ -221,7 +225,7 @@ group "a failed commit leaves no half-finished bump"
 # are now rather than whatever happens to be committed.
 tmp=$(mktemp -d)
 mkdir -p "$tmp/repo"
-cp -r ./wslps ./scripts "$tmp/repo/"
+cp -r ./devps ./scripts "$tmp/repo/"
 if ( cd "$tmp/repo" \
       && git init -q \
       && git add -A \
@@ -232,7 +236,14 @@ if ( cd "$tmp/repo" \
   # missing git identity or an unusable signing key.
   printf '#!/bin/sh\nexit 1\n' > "$tmp/repo/.git/hooks/pre-commit"
   chmod +x "$tmp/repo/.git/hooks/pre-commit"
-  before=$(sed -n 's/^VERSION=\(.*\)$/\1/p' "$tmp/repo/wslps" | head -1)
+  before=$(sed -n 's/^VERSION=\(.*\)$/\1/p' "$tmp/repo/devps" | head -1)
+  # an empty read here would make the comparison below pass without testing
+  # anything, which is exactly how a stale path hid itself once already
+  if [ -n "$before" ]; then
+    pass "the fixture repo has a readable VERSION"
+  else
+    fail "the fixture repo has a readable VERSION (is the copied path right?)"
+  fi
 
   if ( cd "$tmp/repo" && ./scripts/bump patch ) > /dev/null 2> "$tmp/bump.err"; then
     fail "bump should have failed when the commit was rejected"
@@ -240,7 +251,7 @@ if ( cd "$tmp/repo" \
     pass "bump failed as expected"
   fi
 
-  after=$(sed -n 's/^VERSION=\(.*\)$/\1/p' "$tmp/repo/wslps" | head -1)
+  after=$(sed -n 's/^VERSION=\(.*\)$/\1/p' "$tmp/repo/devps" | head -1)
   if [ "$before" = "$after" ]; then
     pass "VERSION was restored ($after)"
   else
