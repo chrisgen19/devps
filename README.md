@@ -65,11 +65,11 @@ The `SWAP` column is the point. A dev server you have not touched in five hours 
 The same report on macOS. Rows elided for length; nothing else is changed:
 
 ```
- MACOS RESOURCES  Fri 04 Sep 21:40  up 3 hours, 42 minutes
+ MACOS RESOURCES  Fri 04 Sep 22:11  up 4 hours, 13 minutes
 
-  RAM    ####################....  82%   13.2G used of 16.0G  (2.8G available)
+  RAM    ####################....  81%   12.9G used of 16.0G  (3.1G available)
   SWAP   ######..................  22%   224M used of 1.0G  (800M free)
-  LOAD   #####...................  18%   2.10 / 2.05 / 2.01  across 12 cores
+  LOAD   ####....................  17%   2.00 / 1.79 / 1.85  across 12 cores
 
   all clear
 
@@ -78,28 +78,27 @@ LISTENING PORTS
        80      800     464K  nginx: worker process
       443      800     464K  nginx: worker process
      3306     1362     7.2M  /opt/homebrew/opt/mysql@8.0/bin/mysqld --basedir=/opt/home
-     5000      674    71.9M  /System/Library/CoreServices/ControlCenter.app/Contents/Ma
+     5000      674    56.4M  /System/Library/CoreServices/ControlCenter.app/Contents/Ma
      5432     1145     7.2M  /opt/homebrew/opt/postgresql@17/bin/postgres -D /opt/homeb
-     8025     1136    10.6M  /opt/homebrew/opt/mailpit/bin/mailpit
-     9000     1137     5.9M  php-fpm: master process (/opt/homebrew/etc/php/8.2/php-fpm
+     8025     1136    16.2M  /opt/homebrew/opt/mailpit/bin/mailpit
 
 GROUPS
   GROUP         COUNT       RAM      SWAP
-  other           484      5.9G         -   ############
-  browser          60      5.8G         -   ############
-  ai-agent          7      847M         -   ##
-  mcp               7     44.0M         -
+  browser          63      7.3G         -   ##############
+  system          326      4.0G         -   ########
+  other            59      901M         -   ##
+  ai-agent          7      744M         -   #
+  mcp               7     44.5M         -
   webserver        24     27.8M         -
   database          8     24.3M         -
-  TOTAL           590     12.6G         -
+  TOTAL           494     13.0G         -
 
 TOP PROCESSES
       PID      RAM     SWAP  GROUP         UPTIME  COMMAND
-    19525     475M        -  ai-agent       2h12m  claude
-      652     353M        -  browser        3h41m  Google Chrome.app/Contents/MacOS/Google Chrome
-    49308     233M        -  other             1m  VLC
-     3404     223M        -  ai-agent       3h11m  claude
-     1366     141M        -  browser        3h40m  com.apple.WebKit.WebContent
+      652     440M        -  browser        4h12m  Google Chrome.app/Contents/MacOS/Google Chrome
+    19525     393M        -  ai-agent       2h43m  claude
+    56153     301M        -  browser           6m  Google Chrome.app/Contents/Frameworks/Google Ch...
+     3055     297M        -  browser        3h44m  Google Chrome.app/Contents/Frameworks/Google Ch...
 ```
 
 Two things that example shows about the port. The `SWAP` column is `-` throughout,
@@ -256,7 +255,7 @@ What it shows that the one-shot report cannot:
 - **new processes** - a pid that appeared since the last sample is highlighted
 - **a colour per group** - `mcp` red, `ai-agent` orange, `dev-server` azure,
   `browser` blue, `editor` violet, `database` gold, `webserver` teal, `node`
-  green, `other` grey. The same colour follows a group into every table, in the
+  green, `system` dark grey, `other` grey. The same colour follows a group into every table, in the
   dashboard and in the one-shot report; `devps help` prints the legend
 - **the same five views** you already have as commands, on keys `1`-`5`
 
@@ -466,9 +465,33 @@ Processes are bucketed by command line, first match wins:
 | `database` | postgres, mysqld, mariadb, redis, mongod |
 | `webserver` | apache2, nginx, php-fpm, httpd |
 | `node` | Any other node, npm, pnpm, yarn, bun |
-| `other` | Everything else |
+| `system` | The OS's own processes. Executable under `/System/`, `/Library/Apple/`, `/usr/libexec/`, `/usr/sbin/`, `/usr/lib/`, `/sbin/` or `/lib/`; or named `com.apple.*`; or a bare `systemd`, `systemd-*`, `launchd`, `dbus-daemon`, `rsyslogd`, `udevd`, `agetty`, `sshd`, `cron` |
+| `other` | Everything else - which, with `system` split out, means things you installed and started |
 
-Kernel threads are excluded.
+Kernel threads are excluded. Every rule above is matched against the
+**executable** only, never the arguments - `/opt/tool --name com.apple.fake` is
+not a system process, and `/home/alice/cron` is not cron.
+
+`system` is tested last, after every other group, so it can only ever claim
+rows that were going to be `other`. `/usr/sbin/nginx` is still a `webserver`
+and `/usr/lib/postgresql/…/postgres` is still a `database`, because those
+branches run first.
+
+`system` is also the one group `kill` will not take as a target. Reading it is
+useful; signalling several hundred OS daemons as a set never is, and the only
+things `kill` protects by default are pid 1 and your own session. `devps kill
+group system` refuses and tells you to name a pid instead.
+
+It matters most on macOS, where the OS runs several hundred daemons of its own.
+Measured on the same machine, from the same snapshot as the capture above:
+
+| Group | Without `system` | With |
+| --- | --- | --- |
+| `other` | 383 procs, 4.85 GB | **57 procs, 0.88 GB** |
+| `system` | — | 326 procs, 3.97 GB |
+
+Every other group is unchanged. `other` stops being the biggest and least
+useful row in the table and goes back to meaning what you would guess.
 
 ## Notes and caveats
 

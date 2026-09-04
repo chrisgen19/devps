@@ -204,7 +204,25 @@ expect_group dev-server 'next-server (v15.5.12)'
 expect_group webserver  'nginx: worker process'
 expect_group browser    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 expect_group ai-agent   'claude'
-expect_group other      '/usr/libexec/secinitd'
+# the OS's own processes, which you did not start and cannot usefully stop
+expect_group system     '/usr/libexec/secinitd'
+expect_group system     '/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter'
+expect_group system     '/lib/systemd/systemd-journald'
+expect_group system     '/usr/sbin/sshd -D'
+# the system branch runs last, so it must not have taken anything that a real
+# group had already claimed - all three of these live under a system prefix
+expect_group webserver  '/usr/sbin/nginx -g daemon off;'
+expect_group database   '/usr/sbin/mysqld --basedir=/usr'
+expect_group database   '/usr/lib/postgresql/17/bin/postgres -D /var/lib/postgresql'
+expect_group browser    '/usr/lib/firefox/firefox'
+# and other keeps its real meaning: something you installed and started
+expect_group other      '/Applications/VLC.app/Contents/MacOS/VLC'
+# only the executable decides the group - an argument must not be able to
+# promote a user process into system
+expect_group other      '/opt/tool --name com.apple.fake'
+expect_group other      '/home/alice/cron --user'
+expect_group other      '/usr/local/bin/sshd-wrapper'
+expect_group other      '/home/bob/launchd'
 
 group "idle classification"
 # ppid 1 plus a hand-started group is an orphan; system daemons at ppid 1 are
@@ -305,6 +323,40 @@ esac
 group "bad input is rejected"
 rejects "unknown command"   "$DEVPS" bogus
 rejects "unknown group"     "$DEVPS" group nope
+
+# system is readable but never killable as a set: build_protected shields pid 1
+# and this session, nothing else, so bulk-signalling it would take the machine.
+#
+# Exit status alone cannot test this. Remove the guard on a host whose snapshot
+# happens to contain no system rows - a slim container - and the command still
+# fails, with "no processes in group", which a plain rejects would read as
+# success. So the predicate is exercised directly, and the end-to-end check
+# matches on the guard's own words.
+eval "$(sed -n '/^DP_UNKILLABLE=/p' "$DEVPS")"
+eval "$(sed -n '/^killable_group()/p' "$DEVPS")"
+if killable_group system; then
+  fail "killable_group rejects system"
+else
+  pass "killable_group rejects system"
+fi
+if killable_group mcp && killable_group dev-server; then
+  pass "killable_group allows the ordinary groups"
+else
+  fail "killable_group allows the ordinary groups"
+fi
+
+# -d as well, so a regression here fails the test rather than the runner
+guard_err=$(mktemp)
+"$DEVPS" kill group system -d > /dev/null 2> "$guard_err" || true
+case "$(cat "$guard_err")" in
+  *"refusing to stop"*)
+    pass "kill group system is refused by the guard, not by an empty match" ;;
+  *)
+    fail "kill group system is refused by the guard (got: $(head -1 "$guard_err"))" ;;
+esac
+rm -f "$guard_err"
+
+ok      "but the system group still reads" "$DEVPS" group system
 rejects "kill with no args" "$DEVPS" kill
 rejects "non-numeric pid"   "$DEVPS" kill pid abc
 rejects "unused port"       "$DEVPS" port 65999
