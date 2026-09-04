@@ -10,7 +10,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
 export NO_COLOR=1
-WSLPS=./wslps
+DEVPS=./devps
 BUMP=./scripts/bump
 fails=0
 
@@ -40,7 +40,7 @@ rejects() {
   if "$@" > /dev/null 2>&1; then fail "$desc (unexpectedly succeeded)"; else pass "$desc"; fi
 }
 
-[ -x "$WSLPS" ] || { echo "selftest: no executable $WSLPS here" >&2; exit 1; }
+[ -x "$DEVPS" ] || { echo "selftest: no executable $DEVPS here" >&2; exit 1; }
 
 group "dependencies"
 for t in ps pgrep awk; do
@@ -52,19 +52,19 @@ for t in $deps; do
 done
 
 group "read-only commands exit clean"
-ok "version"      "$WSLPS" version
-ok "help"         "$WSLPS" help
-ok "report"       "$WSLPS"
-ok "top"          "$WSLPS" top 5
-ok "swap"         "$WSLPS" swap 5
-ok "idle"         "$WSLPS" idle
-ok "ports"        "$WSLPS" ports
-ok "group node"   "$WSLPS" group node
-ok "tree self"    "$WSLPS" tree $$
+ok "version"      "$DEVPS" version
+ok "help"         "$DEVPS" help
+ok "report"       "$DEVPS"
+ok "top"          "$DEVPS" top 5
+ok "swap"         "$DEVPS" swap 5
+ok "idle"         "$DEVPS" idle
+ok "ports"        "$DEVPS" ports
+ok "group node"   "$DEVPS" group node
+ok "tree self"    "$DEVPS" tree $$
 
 group "pressure, projects and doctor"
-linux_only "projects"   "$WSLPS" projects
-linux_only "doctor"     "$WSLPS" doctor
+linux_only "projects"   "$DEVPS" projects
+linux_only "doctor"     "$DEVPS" doctor
 # PSI thresholds are unreachable on an idle box, so drive them from fixtures
 psidir=$(mktemp -d)
 printf 'some avg10=12.34 avg60=1.03 avg300=1.83 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n' > "$psidir/cpu"
@@ -72,7 +72,7 @@ printf 'some avg10=70.24 avg60=68.52 avg300=69.91 total=1\nfull avg10=57.59 avg6
 printf 'some avg10=33.30 avg60=30.00 avg300=25.00 total=1\nfull avg10=11.10 avg60=10.00 avg300=9.00 total=1\n' > "$psidir/io"
 # grep -q closes the pipe early, and with pipefail that would mask the result,
 # so read the report into a variable and match against that
-psiout=$(WSLPS_PSI_DIR="$psidir" "$WSLPS")
+psiout=$(DEVPS_PSI_DIR="$psidir" "$DEVPS")
 case "$psiout" in
   *"memory thrashing"*) pass "psi fixture raises the thrashing alert" ;;
   *)                    fail "psi fixture raises the thrashing alert" ;;
@@ -83,7 +83,7 @@ case "$psiout" in
 esac
 printf 'some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n' > "$psidir/cpu"
 cp "$psidir/cpu" "$psidir/memory"; cp "$psidir/cpu" "$psidir/io"
-psiout=$(WSLPS_PSI_DIR="$psidir" "$WSLPS")
+psiout=$(DEVPS_PSI_DIR="$psidir" "$DEVPS")
 case "$psiout" in
   *"all clear"*) pass "quiet psi leaves the report clear" ;;
   *)             fail "quiet psi leaves the report clear" ;;
@@ -103,12 +103,12 @@ echo '{}' > "$proj/package.json"
 ( cd "$deep" && exec sleep 20 ) &
 deep_pid=$!
 sleep 1
-projout=$("$WSLPS" projects)
+projout=$("$DEVPS" projects)
 case "$projout" in
   *"$(basename "$proj")"*) pass "a process 12 levels down is attributed to its project" ;;
   *)                       fail "a process 12 levels down is attributed to its project" ;;
 esac
-killout=$("$WSLPS" kill project "$(basename "$proj")" -d)
+killout=$("$DEVPS" kill project "$(basename "$proj")" -d)
 case "$killout" in
   *"$deep_pid"*) pass "kill project reaches it too" ;;
   *)             fail "kill project reaches it too" ;;
@@ -122,12 +122,12 @@ group "the dashboard and the CLI share one idle predicate"
 # they answered the same question differently once: the CLI moved to an
 # instantaneous CPU sample and orphan detection while the dashboard kept the
 # old lifetime-average test. One definition, referenced twice.
-if [ "$(grep -c 'IDLE_AWK' "$WSLPS")" -ge 3 ]; then
+if [ "$(grep -c 'IDLE_AWK' "$DEVPS")" -ge 3 ]; then
   pass "one predicate, referenced by both callers"
 else
   fail "one predicate, referenced by both callers"
 fi
-if grep -q '[$]5 < 1.0' "$WSLPS"; then
+if grep -q '[$]5 < 1.0' "$DEVPS"; then
   fail "no caller still filters on the lifetime CPU average"
 else
   pass "no caller still filters on the lifetime CPU average"
@@ -172,24 +172,42 @@ if [ "$PLAT" = Linux ]; then want_label="WSL RESOURCES"; else want_label="MACOS 
 if [ -z "$TIMEOUT" ]; then
   skip "dash falls back to a plain report over a pipe (no timeout(1))"
 else
-  dash_out=$($TIMEOUT 3 "$WSLPS" dash 1 | head -3) || true
+  dash_out=$($TIMEOUT 3 "$DEVPS" dash 1 | head -3) || true
   if printf '%s' "$dash_out" | grep -q "$want_label"; then
     pass "dash falls back to a plain report over a pipe"
   else
     fail "dash falls back to a plain report over a pipe"
   fi
 fi
-ok "ascii mode renders"   env WSLPS_ASCII=1 "$WSLPS" top 3
-ok "report with a fake dumb terminal" env TERM=dumb "$WSLPS" top 3
+ok "ascii mode renders"   env DEVPS_ASCII=1 "$DEVPS" top 3
+ok "report with a fake dumb terminal" env TERM=dumb "$DEVPS" top 3
+
+group "the old name still works"
+# the rename kept wslps as an alias; PROG is whatever the user typed, so the
+# alias has to describe itself rather than the new name
+alias_dir=$(mktemp -d)
+ln -s "$PWD/devps" "$alias_dir/wslps"
+alias_help=$("$alias_dir/wslps" help)
+case "$alias_help" in
+  *"wslps [command]"*) pass "a wslps symlink names itself in its own help" ;;
+  *)                   fail "a wslps symlink names itself in its own help" ;;
+esac
+ok "wslps alias runs"  "$alias_dir/wslps" top 3
+alias_ver=$("$alias_dir/wslps" version)
+case "$alias_ver" in
+  wslps\ *) pass "the alias reports its own name in version" ;;
+  *)        fail "the alias reports its own name in version" ;;
+esac
+rm -rf "$alias_dir"
 
 group "bad input is rejected"
-rejects "unknown command"   "$WSLPS" bogus
-rejects "unknown group"     "$WSLPS" group nope
-rejects "kill with no args" "$WSLPS" kill
-rejects "non-numeric pid"   "$WSLPS" kill pid abc
-rejects "unused port"       "$WSLPS" port 65999
-rejects "non-numeric dash interval" "$WSLPS" dash xyz
-if [ "$PLAT" = Linux ]; then rejects "unknown project" "$WSLPS" kill project __no_such_project__ -y
+rejects "unknown command"   "$DEVPS" bogus
+rejects "unknown group"     "$DEVPS" group nope
+rejects "kill with no args" "$DEVPS" kill
+rejects "non-numeric pid"   "$DEVPS" kill pid abc
+rejects "unused port"       "$DEVPS" port 65999
+rejects "non-numeric dash interval" "$DEVPS" dash xyz
+if [ "$PLAT" = Linux ]; then rejects "unknown project" "$DEVPS" kill project __no_such_project__ -y
 else skip "unknown project (Linux only)"; fi
 
 group "version bumper rejects malformed versions"
@@ -249,7 +267,7 @@ group "kill guards"
 err=$(mktemp)
 trap 'rm -f "$err"' EXIT
 
-if "$WSLPS" kill pid 1 -d > /dev/null 2> "$err"; then
+if "$DEVPS" kill pid 1 -d > /dev/null 2> "$err"; then
   fail "kill pid 1 must be refused"
 elif grep -q "refusing to kill pid 1" "$err"; then
   pass "kill pid 1 is refused"
@@ -257,7 +275,7 @@ else
   fail "kill pid 1 refused for the wrong reason: $(cat "$err")"
 fi
 
-if "$WSLPS" kill pid $$ -d > /dev/null 2> "$err"; then
+if "$DEVPS" kill pid $$ -d > /dev/null 2> "$err"; then
   fail "killing our own session must be refused"
 elif grep -q "your own shell or session" "$err"; then
   pass "own session is refused"
@@ -268,7 +286,7 @@ fi
 group "dry run is inert"
 sleep 300 &
 victim=$!
-if "$WSLPS" kill pid "$victim" -d | grep -q "dry run - nothing was killed"; then
+if "$DEVPS" kill pid "$victim" -d | grep -q "dry run - nothing was killed"; then
   pass "dry run reports itself"
 else
   fail "dry run did not report itself"
@@ -284,7 +302,7 @@ wait "$victim" 2> /dev/null
 group "a real kill actually kills"
 sleep 300 &
 victim=$!
-if "$WSLPS" kill pid "$victim" -y > /dev/null; then
+if "$DEVPS" kill pid "$victim" -y > /dev/null; then
   pass "kill exited clean"
 else
   fail "kill did not exit clean"

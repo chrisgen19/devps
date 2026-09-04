@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bump - set the VERSION in wslps, commit it, and tag it.
+# bump - set the VERSION in devps, commit it, and tag it.
 #
 #   scripts/bump patch     2.0.0 -> 2.0.1
 #   scripts/bump minor     2.0.0 -> 2.1.0
@@ -12,7 +12,7 @@ set -Eeuo pipefail
 
 cd "$(dirname "$0")/.."
 
-SCRIPT=wslps
+SCRIPT=devps
 die() { printf 'bump: %s\n' "$*" >&2; exit 1; }
 
 # Everything from the sed rewrite onwards is undone if any step fails. Without

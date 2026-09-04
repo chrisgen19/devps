@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# wslps - see what is running in this WSL instance, what it costs, and stop it safely.
-# Dependencies: bash, procps, iproute2, awk. Nothing else.
+# devps - see what your dev machine is running, what it costs, and stop it safely.
+# Linux and WSL2 read /proc; macOS reads sysctl, vm_stat and lsof.
+# Dependencies: bash 4+, ps, pgrep, awk, and iproute2 (Linux) or lsof (macOS).
+#
+# Formerly wslps. Invoked under either name: PROG is what the user typed, so a
+# wslps symlink still describes itself as wslps in its own help and errors.
 
 set -uo pipefail
 VERSION=2.1.0
+PROG=${0##*/}
 
 # ---------------------------------------------------------------- colour ----
 # UI_COLOR   0 plain, 1 sixteen colours, 2 two-hundred-and-fifty-six
@@ -88,14 +93,14 @@ ui_detect() {
       *UTF-8*|*utf-8*|*utf8*|*UTF8*) UI_UNICODE=1 ;;
     esac
   fi
-  [ "${WSLPS_ASCII:-}" = "" ] || UI_UNICODE=0
+  [ "${DEVPS_ASCII:-${WSLPS_ASCII:-}}" = "" ] || UI_UNICODE=0
   palette
 }
 ui_detect
 
 nocolour() { UI_COLOR=0; UI_UNICODE=0; palette; }
 
-die() { printf '%swslps: %s%s\n' "$C_R" "$*" "$C_0" >&2; exit 2; }
+die() { printf '%s%s: %s%s\n' "$C_R" "$PROG" "$*" "$C_0" >&2; exit 2; }
 
 # ------------------------------------------------------------- bar drawing ----
 # _abar <permille 0-1000> [width] - gradient bar with eighth-cell tips.
@@ -403,10 +408,10 @@ PSI_OK=0
 PSI_ALERTS=()
 PSI_CPU=0; PSI_MEM=0; PSI_MEM_FULL=0; PSI_IO=0; PSI_IO_FULL=0
 
-# WSLPS_PSI_DIR points the reader at fixtures, so the thresholds below are
+# DEVPS_PSI_DIR points the reader at fixtures, so the thresholds below are
 # testable without having to thrash a real machine to reach them
 psi_read() {
-  local d=${WSLPS_PSI_DIR:-/proc/pressure} out
+  local d=${DEVPS_PSI_DIR:-${WSLPS_PSI_DIR:-/proc/pressure}} out
   [ -r "$d/cpu" ] || { PSI_OK=0; return 1; }
   out=$(awk '
     function pct(s,   v) { sub(/^.*avg10=/, "", s); sub(/ .*$/, "", s); return int(v = s * 100 + 0.5) }
@@ -612,7 +617,7 @@ header() {
     fi
   fi
   if [ "$warned" = 1 ]; then
-    printf '  %stry: wslps idle    then: wslps kill port <n>%s\n' "$C_DIM" "$C_0"
+    printf '  %stry: %s idle    then: %s kill port <n>%s\n' "$C_DIM" "$PROG" "$PROG" "$C_0"
   else
     printf '  %sall clear%s\n' "$C_G" "$C_0"
   fi
@@ -683,7 +688,7 @@ ports_table() {
   while IFS=$'\t' read -r port pid; do
     rss=""; args=""
     if [ -z "$pid" ]; then
-      args="${C_DIM}(another user - run: sudo wslps ports)${C_0}"
+      args="${C_DIM}(another user - run: sudo $PROG ports)${C_0}"
     elif pid_alive "$pid"; then
       rss=$(ps -o rss= -p "$pid" | tr -d ' ')
       args=$(ps -o args= -p "$pid" | cut -c1-58)
@@ -774,7 +779,7 @@ kill_cmd() {
     esac
   done
   if [ -z "$kind" ] || [ -z "$target" ]; then
-    die "usage: wslps kill port <n> | pid <n> | group <name> | project <name>   [-y] [-9] [-d]"
+    die "usage: $PROG kill port <n> | pid <n> | group <name> | project <name>   [-y] [-9] [-d]"
   fi
 
   build_protected
@@ -784,7 +789,7 @@ kill_cmd() {
       case "$target" in *[!0-9]*) die "port must be a number" ;; esac
       mapfile -t roots < <(listeners |
         awk -F'\t' -v p="$target" '$1 == p && $2 != "" { print $2 }' | sort -u)
-      [ "${#roots[@]}" -gt 0 ] || die "nothing is listening on port $target (try: wslps ports)"
+      [ "${#roots[@]}" -gt 0 ] || die "nothing is listening on port $target (try: $PROG ports)"
       for r in "${roots[@]}"; do climbed+=("$(climb "$r")"); done
       mapfile -t roots < <(printf '%s\n' "${climbed[@]}" | sort -u)
       ;;
@@ -803,7 +808,7 @@ kill_cmd() {
     project)
       local hits distinct
       hits=$(project_pids "$target")
-      [ -n "${hits//[[:space:]]/}" ] || die "no processes for project '$target' (try: wslps projects)"
+      [ -n "${hits//[[:space:]]/}" ] || die "no processes for project '$target' (try: $PROG projects)"
       distinct=$(printf '%s\n' "$hits" | cut -f1 | sort -u)
       if [ "$(printf '%s\n' "$distinct" | grep -c .)" -gt 1 ]; then
         die "'$target' matches more than one project - name the path:
@@ -911,7 +916,7 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
 snapshot_rate() {
   local gap=${1:-0.3} f us1 dt hz
   hz=$(getconf CLK_TCK) || hz=100
-  f=$(mktemp -t wslps.XXXXXX) || die "cannot create a temp file"
+  f=$(mktemp -t devps.XXXXXX) || die "cannot create a temp file"
   us1=${EPOCHREALTIME/[.,]/}
   snapshot | awk -F'\t' '{ print $1 "\t" $8 "\t" $10 }' > "$f"
   sleep "$gap"
@@ -930,7 +935,7 @@ snapshot_rate() {
   rm -f "$f"
 }
 
-# The idle/orphan predicate, shared by "wslps idle" and the dashboard's idle
+# The idle/orphan predicate, shared by "devps idle" and the dashboard's idle
 # view so the same question cannot get two answers. Input is snapshot columns
 # plus 11 = instant cpu%, which both callers produce; output appends a reason.
 # shellcheck disable=SC2016  # an awk program: $6 and friends are its fields
@@ -971,7 +976,7 @@ port_cmd() {
   case "$port" in *[!0-9]*) die "port must be a number" ;; esac
   pid=$(listeners |
     awk -F'\t' -v p="$port" '$1 == p && $2 != "" { print $2 }' | sort -u | head -1)
-  [ -n "$pid" ] || die "nothing listening on port $port (try: wslps ports)"
+  [ -n "$pid" ] || die "nothing listening on port $port (try: $PROG ports)"
   build_protected
   root=$(climb "$pid")
   printf '%sPORT %s%s\n' "$C_B" "$port" "$C_0"
@@ -979,8 +984,8 @@ port_cmd() {
   printf '  command      : %s\n' "$(ps -o args= -p "$pid" | cut -c1-70)"
   printf '  started      : %s\n' "$(ps -o lstart= -p "$pid" | sed 's/^ *//')"
   printf '  project dir  : %s\n' "$(proc_cwd "$pid" || echo '?')"
-  printf '  server root  : %s  %s<- what "wslps kill port %s" targets%s\n' \
-    "$root" "$C_DIM" "$port" "$C_0"
+  printf '  server root  : %s  %s<- what "%s kill port %s" targets%s\n' \
+    "$root" "$C_DIM" "$PROG" "$port" "$C_0"
   echo
   tree_cmd "$root"
 }
@@ -1304,11 +1309,11 @@ dash_port_raw() {
 
 dash_port_fmt() {
   printf '%s\n%s\n' "$SNAP_ROWS" "$1" | awk -F'\t' \
-    -v CD="$C_DIM" -v C0="$C_0" -v CG="$C_G" -v CY="$C_Y" -v W="$TCOLS" "$AWKLIB"'
+    -v CD="$C_DIM" -v C0="$C_0" -v CG="$C_G" -v CY="$C_Y" -v W="$TCOLS" -v PROG="$PROG" "$AWKLIB"'
     NF > 3 { rss[$1] = $2; args[$1] = $7; cpu[$1] = $11 + 0; next }
     { pid = $2
       cmd = (pid in args) ? shorten(args[pid], W - 42) \
-          : (pid == "" ? "(another user - run: sudo wslps ports)" : "(exited)")
+          : (pid == "" ? ("(another user - run: sudo " PROG " ports)") : "(exited)")
       printf "%s%7s%s %s%8s%s %s%8s%s %s%5.1f%%%s  %s\n",
         CG, $1, C0, CD, (pid == "" ? "-" : pid), C0,
         CY, (pid in rss ? hum(rss[pid]) : "-"), C0,
@@ -1394,8 +1399,8 @@ dash_header() {
   bw=$(( TCOLS - 62 )); [ "$bw" -gt 26 ] && bw=26; [ "$bw" -lt 8 ] && bw=8
   [ "$DASH_PAUSED" = 1 ] && paused="${C_Y}   PAUSED"
 
-  printf -v line ' %s%s%s %sWSLPS%s %s%s%s   %s%(%a %d %b %H:%M:%S)T  %s  every %ss%s%s' \
-    "$C_ACC" "$sp" "$C_0" "$C_HEAD" "$C_0" "$C_ACC" "$DASH_VIEW" "$C_0" \
+  printf -v line ' %s%s%s %s%s%s %s%s%s   %s%(%a %d %b %H:%M:%S)T  %s  every %ss%s%s' \
+    "$C_ACC" "$sp" "$C_0" "$C_HEAD" "${PROG^^}" "$C_0" "$C_ACC" "$DASH_VIEW" "$C_0" \
     "$C_DIM" -1 "$UPSTR" "$DASH_INT" "$paused" "$C_0"
   OUT+=("$line")
 
@@ -1500,7 +1505,7 @@ dash_help_panel() {
   OUT+=("   ${C_ACC}p${C_0}   pause sampling    ${C_ACC}r${C_0}  resample now")
   OUT+=("   ${C_ACC}+ -${C_0} refresh interval  ${C_ACC}q${C_0}  quit")
   OUT+=("")
-  OUT+=(" ${C_DIM}x and t drop out to the normal wslps commands, so every kill guard${C_0}")
+  OUT+=(" ${C_DIM}x and t drop out to the normal $PROG commands, so every kill guard${C_0}")
   OUT+=(" ${C_DIM}still applies: your own shell and session are never candidates.${C_0}")
   OUT+=("")
   OUT+=(" ${C_DIM}press any key to go back${C_0}")
@@ -1638,7 +1643,7 @@ dash_prompt() {
   printf '\033[?25l'
 }
 
-# leave the alternate screen, run a normal wslps command, come back
+# leave the alternate screen, run a normal devps command, come back
 dash_shell_out() {
   printf '\033[?1049l\033[?25h'
   "$@"
@@ -1744,7 +1749,7 @@ dash_cmd() {
   [ "$UI_UNICODE" = 1 ] && POINTER="❯"
   CORES=$(nproc)
   CLK_TCK=$(getconf CLK_TCK) || CLK_TCK=100
-  PREVF=$(mktemp -t wslps.XXXXXX) || die "cannot create a temp file"
+  PREVF=$(mktemp -t devps.XXXXXX) || die "cannot create a temp file"
   : > "$PREVF"
 
   trap 'dash_cleanup; exit 0' INT TERM
@@ -2190,30 +2195,30 @@ find_vhdx() {
 # ------------------------------------------------------------------- help ----
 usage() {
   cat <<EOF
-${C_B}wslps${C_0} v$VERSION - what is running in this WSL box, and what it costs
+${C_B}$PROG${C_0} v$VERSION - what this machine is running, and what it costs
 
 ${C_B}USAGE${C_0}
-  wslps [command] [args]
+  $PROG [command] [args]
 
 ${C_B}LOOKING${C_0}
-  ${C_C}wslps${C_0}                     full report: memory, ports, groups, top processes
-  ${C_C}wslps top${C_0} [N]              N biggest processes by RAM        (default 15)
-  ${C_C}wslps swap${C_0} [N]             N biggest swap hogs               (default 15)
-  ${C_C}wslps idle${C_0}                 processes doing nothing, or left behind by a closed shell
-  ${C_C}wslps projects${C_0}             what each project costs, and the ports it owns
-  ${C_C}wslps doctor${C_0}               is this WSL box configured to survive your work
-  ${C_C}wslps group${C_0} <name>         every process in one group
-  ${C_C}wslps ports${C_0}                everything listening
-  ${C_C}wslps port${C_0} <n>             who owns port n, its project dir, its tree
-  ${C_C}wslps tree${C_0} <pid>           process tree under a pid
-  ${C_C}wslps dash${C_0} [secs]          live interactive dashboard        (default 2)
-  ${C_C}wslps watch${C_0} [secs]         alias for dash
+  ${C_C}$PROG${C_0}                     full report: memory, ports, groups, top processes
+  ${C_C}$PROG top${C_0} [N]              N biggest processes by RAM        (default 15)
+  ${C_C}$PROG swap${C_0} [N]             N biggest swap hogs               (default 15)
+  ${C_C}$PROG idle${C_0}                 processes doing nothing, or left behind by a closed shell
+  ${C_C}$PROG projects${C_0}             what each project costs, and the ports it owns
+  ${C_C}$PROG doctor${C_0}               is this WSL box configured to survive your work
+  ${C_C}$PROG group${C_0} <name>         every process in one group
+  ${C_C}$PROG ports${C_0}                everything listening
+  ${C_C}$PROG port${C_0} <n>             who owns port n, its project dir, its tree
+  ${C_C}$PROG tree${C_0} <pid>           process tree under a pid
+  ${C_C}$PROG dash${C_0} [secs]          live interactive dashboard        (default 2)
+  ${C_C}$PROG watch${C_0} [secs]         alias for dash
 
 ${C_B}STOPPING${C_0}
-  ${C_C}wslps kill port${C_0} <n>        stop whatever serves port n, plus its children
-  ${C_C}wslps kill pid${C_0} <n>         stop one process plus its children
-  ${C_C}wslps kill group${C_0} <name>    stop every process in a group
-  ${C_C}wslps kill project${C_0} <name>  stop everything running in one project
+  ${C_C}$PROG kill port${C_0} <n>        stop whatever serves port n, plus its children
+  ${C_C}$PROG kill pid${C_0} <n>         stop one process plus its children
+  ${C_C}$PROG kill group${C_0} <name>    stop every process in a group
+  ${C_C}$PROG kill project${C_0} <name>  stop everything running in one project
 
   Kill previews exactly what dies and how much it frees, then asks.
   It refuses to touch your own shell or the session you are typing in.
@@ -2222,7 +2227,7 @@ ${C_B}STOPPING${C_0}
   ${C_DIM}-9${C_0}   SIGKILL instead of SIGTERM (if it ignored the polite ask)
   ${C_DIM}-d${C_0}   dry run - show the victims, kill nothing
 
-${C_B}DASHBOARD${C_0} ${C_DIM}(wslps dash)${C_0}
+${C_B}DASHBOARD${C_0} ${C_DIM}($PROG dash)${C_0}
   ${C_C}1-6${C_0} overview, processes, idle, ports, groups, projects   ${C_C}tab${C_0} cycle
   ${C_C}up down${C_0} move   ${C_C}s${C_0} sort   ${C_C}/${C_0} filter   ${C_C}t${C_0} tree
   ${C_C}x${C_0} stop the selection (asks first)   ${C_C}X${C_0} same with SIGKILL
@@ -2230,23 +2235,23 @@ ${C_B}DASHBOARD${C_0} ${C_DIM}(wslps dash)${C_0}
 
   Colour and block glyphs turn themselves off when the output is not a
   terminal, when NO_COLOR is set, or when the locale is not UTF-8.
-  WSLPS_ASCII=1 keeps the colour and draws with # and . instead.
+  DEVPS_ASCII=1 keeps the colour and draws with # and . instead.
 
 ${C_B}GROUPS${C_0}
   $(group_legend)
   ${C_DIM}each group keeps its colour in every table${C_0}
 
 ${C_B}EXAMPLES${C_0}
-  wslps dash                  the live dashboard - watch RAM move, kill from it
-  wslps projects              which checkout is costing you, not which process
-  wslps doctor                why the box died at 3am (memory cap, disk, 9P)
-  wslps swap                  who is paged out - the real cause of slowness
-  wslps idle                  the dev servers you forgot about, and the orphans
-  wslps port 3111             which project is this, and where does it live
-  wslps kill port 3000        stop that Next dev server cleanly
-  wslps kill group mcp -d     preview reaping every stray MCP process
-  wslps kill project foo      stop every process running in the foo checkout
-  NO_COLOR=1 wslps            plain output for piping or logs
+  $PROG dash                  the live dashboard - watch RAM move, kill from it
+  $PROG projects              which checkout is costing you, not which process
+  $PROG doctor                why the box died at 3am (memory cap, disk, 9P)
+  $PROG swap                  who is paged out - the real cause of slowness
+  $PROG idle                  the dev servers you forgot about, and the orphans
+  $PROG port 3111             which project is this, and where does it live
+  $PROG kill port 3000        stop that Next dev server cleanly
+  $PROG kill group mcp -d     preview reaping every stray MCP process
+  $PROG kill project foo      stop every process running in the foo checkout
+  NO_COLOR=1 $PROG            plain output for piping or logs
 EOF
 }
 
@@ -2256,7 +2261,7 @@ report() {
   ports_table
   group_table
   proc_table "TOP PROCESSES" "${1:-12}" rss "" 1
-  printf '%s  wslps help for commands - nothing above changed anything.%s\n' "$C_DIM" "$C_0"
+  printf '%s  $PROG help for commands - nothing above changed anything.%s\n' "$C_DIM" "$C_0"
 }
 
 # ------------------------------------------------------------------- main ----
@@ -2265,7 +2270,7 @@ if [ $# -gt 0 ]; then shift; fi
 
 case "$cmd" in
   help|-h|--help)  usage ;;
-  version|-V)      echo "wslps $VERSION" ;;
+  version|-V)      echo "$PROG $VERSION" ;;
   report)          report "${1:-12}" ;;
   top)             header; proc_table "TOP PROCESSES" "${1:-15}" rss "" 1 ;;
   swap)            header; proc_table "SWAP HOGS" "${1:-15}" swap "" 1 ;;
@@ -2273,14 +2278,14 @@ case "$cmd" in
   projects|proj)   header; projects_cmd ;;
   doctor|dr)       doctor_cmd ;;
   group|g)
-      [ $# -ge 1 ] || die "usage: wslps group <${WS_GROUPS// /|}>"
+      [ $# -ge 1 ] || die "usage: $PROG group <${WS_GROUPS// /|}>"
       valid_group "$1" || die "unknown group '$1' (valid: $WS_GROUPS)"
       proc_table "$(echo "$1" | tr '[:lower:]' '[:upper:]') PROCESSES" 200 rss "$1" 0 ;;
   ports)           ports_table ;;
-  port)            [ $# -ge 1 ] || die "usage: wslps port <n>"; port_cmd "$1" ;;
-  tree)            [ $# -ge 1 ] || die "usage: wslps tree <pid>"; tree_cmd "$1" ;;
+  port)            [ $# -ge 1 ] || die "usage: $PROG port <n>"; port_cmd "$1" ;;
+  tree)            [ $# -ge 1 ] || die "usage: $PROG tree <pid>"; tree_cmd "$1" ;;
   kill|k)          kill_cmd "$@" ;;
   dash|d|watch|w)  dash_cmd "${1:-2}" ;;
   -*)              nocolour; report ;;
-  *)               die "unknown command '$cmd' - try: wslps help" ;;
+  *)               die "unknown command '$cmd' - try: $PROG help" ;;
 esac

@@ -23,20 +23,20 @@ jobs:
           shellcheck --version
 
       - name: shellcheck
-        run: shellcheck --severity=style --format=gcc wslps scripts/bump scripts/selftest
+        run: shellcheck --severity=style --format=gcc devps scripts/bump scripts/selftest
 
       - name: Parse check
         run: |
-          bash -n wslps
+          bash -n devps
           bash -n scripts/bump
           bash -n scripts/selftest
 
       - name: Executable bit is committed
         run: |
-          mode=$(git ls-files -s wslps | awk '{print $1}')
+          mode=$(git ls-files -s devps | awk '{print $1}')
           echo "mode=$mode"
           if [ "$mode" != "100755" ]; then
-            echo "::error::wslps must be committed executable (100755), found $mode"
+            echo "::error::devps must be committed executable (100755), found $mode"
             exit 1
           fi
 

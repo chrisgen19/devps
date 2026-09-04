@@ -14,19 +14,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # A tag that disagrees with the script's own VERSION means `wslps version`
+      # A tag that disagrees with the script's own VERSION means `devps version`
       # would lie to everyone who installs it. Refuse to publish that.
-      - name: Tag matches VERSION in wslps
+      - name: Tag matches VERSION in devps
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          script=$(sed -n 's/^VERSION=\(.*\)$/\1/p' wslps | head -1)
+          script=$(sed -n 's/^VERSION=\(.*\)$/\1/p' devps | head -1)
           echo "tag=$tag script=$script"
           if ! printf '%s' "$script" | grep -qE '^(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)){2}$'; then
-            echo "::error::VERSION=$script in wslps is not a valid X.Y.Z"
+            echo "::error::VERSION=$script in devps is not a valid X.Y.Z"
             exit 1
           fi
           if [ "$tag" != "$script" ]; then
-            echo "::error::tag v$tag does not match VERSION=$script in wslps"
+            echo "::error::tag v$tag does not match VERSION=$script in devps"
             exit 1
           fi
 
@@ -37,14 +37,22 @@ jobs:
 
       - name: Lint before publishing
         run: |
-          shellcheck --severity=style --format=gcc wslps scripts/bump scripts/selftest
-          bash -n wslps
+          shellcheck --severity=style --format=gcc devps scripts/bump scripts/selftest
+          bash -n devps
 
       # Tag pushes do not trigger ci.yml, and GitHub does not make this job wait
       # on the run for the same commit on main. Without this step a tag could
       # publish a build whose kill guards had regressed. Run the same suite here.
       - name: Self test before publishing
         run: ./scripts/selftest
+
+      # The tool was called wslps up to v2.1.0. Publishing the same script under
+      # both names keeps existing curl-the-latest-release install lines working;
+      # the script reads its own name from $0, so the old asset still calls
+      # itself wslps in its help and errors. Drop the compat asset once the
+      # install instructions have had a release or two to circulate.
+      - name: Stage the compatibility asset
+        run: cp devps wslps
 
       - name: Create release
         env:
@@ -53,4 +61,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            wslps
+            devps wslps
