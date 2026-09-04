@@ -1017,6 +1017,12 @@ DASH_PAUSED=0
 DASH_SEL=0
 DASH_TOP=0
 DASH_SORT=rss
+# Sortable columns, in cycle order. swap and io are dropped where the platform
+# cannot fill them: sorting rows that are all zero is not a ranking, it is the
+# snapshot's own order under a "TOP BY SWAP" heading - the same reason the swap
+# command refuses. Derived like DASH_VIEWS so the key and the label agree.
+DASH_SORTS="rss cpu swap io uptime"
+[ "$WS_PLATFORM" = linux ] || DASH_SORTS="rss cpu uptime"
 DASH_FILTER=""
 DASH_MSG=""
 DASH_HELP=0
@@ -1644,6 +1650,14 @@ dash_viewlist() {
   printf '%s' "overview, processes, idle, ports, groups${v[5]+, projects}"
 }
 
+dash_sort_step() {
+  local -a v; read -ra v <<< "$DASH_SORTS"
+  local i n=${#v[@]}
+  for (( i = 0; i < n; i++ )); do [ "${v[i]}" = "$DASH_SORT" ] && break; done
+  DASH_SORT="${v[$(( (i + 1) % n ))]}"
+  dash_build
+}
+
 dash_goto() {
   case " $DASH_VIEWS " in *" $1 "*) ;; *) return 0 ;; esac
   DASH_VIEW="$1"; DASH_SEL=0; DASH_TOP=0; dash_build
@@ -1721,13 +1735,7 @@ dash_keys() {
     6)       dash_goto projects ;;
     $'\t'|right) dash_view_step 1 ;;
     left)    dash_view_step -1 ;;
-    s)       case "$DASH_SORT" in
-               rss)  DASH_SORT=cpu ;;
-               cpu)  DASH_SORT=swap ;;
-               swap) DASH_SORT=io ;;
-               io)   DASH_SORT=uptime ;;
-               *)    DASH_SORT=rss ;;
-             esac; dash_build ;;
+    s)       dash_sort_step ;;
     p)       DASH_PAUSED=$(( 1 - DASH_PAUSED )) ;;
     r)       dash_sample ;;
     +|=)     [ "$DASH_INT" -lt 30 ] && DASH_INT=$(( DASH_INT + 1 )) ;;

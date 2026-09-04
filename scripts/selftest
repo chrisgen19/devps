@@ -200,6 +200,21 @@ case "$alias_ver" in
 esac
 rm -rf "$alias_dir"
 
+group "the dashboard cannot sort on a column this platform cannot fill"
+# swap and io are zero for every row on Darwin; sorting them would present the
+# snapshot's own order under a TOP BY SWAP heading, which is what the swap
+# command already refuses to do
+if [ "$(grep -c 'DASH_SORTS' "$DEVPS")" -ge 3 ]; then
+  pass "the sort cycle is derived from DASH_SORTS, not hardcoded"
+else
+  fail "the sort cycle is derived from DASH_SORTS, not hardcoded"
+fi
+if grep -q 'swap) DASH_SORT=io' "$DEVPS"; then
+  fail "no caller still hardcodes the sort cycle"
+else
+  pass "no caller still hardcodes the sort cycle"
+fi
+
 group "help does not advertise what this platform cannot do"
 # the key span and the view list are derived from DASH_VIEWS, so this catches
 # help drifting away from what the number keys actually do
