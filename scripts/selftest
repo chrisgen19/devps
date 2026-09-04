@@ -323,10 +323,39 @@ esac
 group "bad input is rejected"
 rejects "unknown command"   "$DEVPS" bogus
 rejects "unknown group"     "$DEVPS" group nope
+
 # system is readable but never killable as a set: build_protected shields pid 1
 # and this session, nothing else, so bulk-signalling it would take the machine.
-# -d so a regression here fails the test rather than the runner.
-rejects "kill group system is refused" "$DEVPS" kill group system -d
+#
+# Exit status alone cannot test this. Remove the guard on a host whose snapshot
+# happens to contain no system rows - a slim container - and the command still
+# fails, with "no processes in group", which a plain rejects would read as
+# success. So the predicate is exercised directly, and the end-to-end check
+# matches on the guard's own words.
+eval "$(sed -n '/^DP_UNKILLABLE=/p' "$DEVPS")"
+eval "$(sed -n '/^killable_group()/p' "$DEVPS")"
+if killable_group system; then
+  fail "killable_group rejects system"
+else
+  pass "killable_group rejects system"
+fi
+if killable_group mcp && killable_group dev-server; then
+  pass "killable_group allows the ordinary groups"
+else
+  fail "killable_group allows the ordinary groups"
+fi
+
+# -d as well, so a regression here fails the test rather than the runner
+guard_err=$(mktemp)
+"$DEVPS" kill group system -d > /dev/null 2> "$guard_err" || true
+case "$(cat "$guard_err")" in
+  *"refusing to stop"*)
+    pass "kill group system is refused by the guard, not by an empty match" ;;
+  *)
+    fail "kill group system is refused by the guard (got: $(head -1 "$guard_err"))" ;;
+esac
+rm -f "$guard_err"
+
 ok      "but the system group still reads" "$DEVPS" group system
 rejects "kill with no args" "$DEVPS" kill
 rejects "non-numeric pid"   "$DEVPS" kill pid abc
