@@ -256,7 +256,7 @@ What it shows that the one-shot report cannot:
 - **new processes** - a pid that appeared since the last sample is highlighted
 - **a colour per group** - `mcp` red, `ai-agent` orange, `dev-server` azure,
   `browser` blue, `editor` violet, `database` gold, `webserver` teal, `node`
-  green, `other` grey. The same colour follows a group into every table, in the
+  green, `system` dark grey, `other` grey. The same colour follows a group into every table, in the
   dashboard and in the one-shot report; `devps help` prints the legend
 - **the same five views** you already have as commands, on keys `1`-`5`
 
@@ -466,9 +466,26 @@ Processes are bucketed by command line, first match wins:
 | `database` | postgres, mysqld, mariadb, redis, mongod |
 | `webserver` | apache2, nginx, php-fpm, httpd |
 | `node` | Any other node, npm, pnpm, yarn, bun |
-| `other` | Everything else |
+| `system` | The OS's own processes: `/System/`, `/usr/libexec/`, `/usr/sbin/`, `/lib/`, `com.apple.*`, systemd, launchd |
+| `other` | Everything else - which, with `system` split out, means things you installed and started |
 
 Kernel threads are excluded.
+
+`system` is tested last, after every other group, so it can only ever claim
+rows that were going to be `other`. `/usr/sbin/nginx` is still a `webserver`
+and `/usr/lib/postgresql/…/postgres` is still a `database`, because those
+branches run first.
+
+It matters most on macOS, where the OS runs several hundred daemons of its own.
+On the machine the capture above came from:
+
+| Group | Without `system` | With |
+| --- | --- | --- |
+| `other` | 415 procs, 5.24 GB | **57 procs, 1.09 GB** |
+| `system` | — | 358 procs, 4.14 GB |
+
+Every other group is unchanged. `other` stops being the biggest and least
+useful row in the table and goes back to meaning what you would guess.
 
 ## Notes and caveats
 
