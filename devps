@@ -233,11 +233,56 @@ function redact(s,   n, a, i, j, t, k, p, rest, slash, at, ui, c, out) {
   }
   return out
 }
-function shorten(a, w,   s) {
+# Chromium and Electron apps run one process per tab, per GPU context and per
+# utility service, all of them execing the same helper binary several
+# directories deep inside the bundle. Truncating that path leaves two dozen
+# identical rows that say nothing about which is which. The field that
+# distinguishes them is --type=, so collapse the whole thing to "<app> <type>".
+#
+# Returns "" when this is not a helper, which is every process that has no
+# --type= at all.
+function helper(s,   app, t, u, head) {
+  # --type= has to be a whole argument. Without the boundary,
+  # "--expected=--type=renderer" matches, and a greedy search would take the
+  # last spelling in the line rather than the first real one.
+  if (!match(s, /(^| )--type=[a-z-]+( |$)/)) return ""
+  t = substr(s, RSTART, RLENGTH); gsub(/^ ?--type=| $/, "", t)
+  # only the process types Chromium actually uses, so that "mount --type=ext4"
+  # and anything else that happens to spell --type= is left alone
+  if (t !~ /^(renderer|gpu-process|utility|zygote|ppapi|ppapi-broker|plugin|broker|crashpad-handler|nacl-loader|service)$/) return ""
+  # and the program has to be one of these to begin with, or an ordinary tool
+  # that takes a --type flag gets rewritten: "node script.js --type=service"
+  # is not a renderer. Bundled helpers are always named Helper something; on
+  # Linux the renderer is the browser binary re-execing itself.
+  head = tolower(s); sub(/ --type=.*/, "", head)
+  if (head !~ /helper/ &&
+      head !~ /(^|\/)(chrome|chromium|chromium-browser|electron|msedge|brave|brave-browser|opera|vivaldi)( |$)/) return ""
+  sub(/-process$/, "", t)                    # gpu-process reads better as gpu
+  # the outermost .app is the application; the nested bundle belongs to the
+  # helper itself. Without one - Linux, where chrome is just a path - fall back
+  # to the basename of the executable.
+  app = s
+  if (match(app, /\/[^\/]+\.app\//)) app = substr(app, RSTART + 1, RLENGTH - 6)
+  else { sub(/[ \t].*/, "", app); sub(/^.*\//, "", app) }
+  if (app == "") return ""
+  # network.mojom.NetworkService is the useful half of a utility process
+  if (t == "utility" && match(s, /--utility-sub-type=[A-Za-z0-9._]+/)) {
+    u = substr(s, RSTART + 19, RLENGTH - 19)
+    sub(/^.*\./, "", u)
+    return app " " t " " u
+  }
+  return app " " t
+}
+function shorten(a, w,   s, h) {
   s = redact(a)
-  sub(/^\/[^ ]*\//, "", s)
-  gsub(/\/home\/[^\/]+\//, "~/", s)
-  gsub(/\/Users\/[^\/]+\//, "~/", s)
+  h = helper(s)
+  if (h != "") {
+    s = h
+  } else {
+    sub(/^\/[^ ]*\//, "", s)
+    gsub(/\/home\/[^\/]+\//, "~/", s)
+    gsub(/\/Users\/[^\/]+\//, "~/", s)
+  }
   if (w > 3 && length(s) > w) s = substr(s, 1, w - 3) "..."
   return s
 }
