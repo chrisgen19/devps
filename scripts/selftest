@@ -227,6 +227,12 @@ expect_short 'mytool --helper=/usr/lib/crashpad_handler run' \
              '/usr/bin/mytool --helper=/usr/lib/crashpad_handler run'
 expect_short 'node --config=helper.json --type=renderer app.js' \
              '/usr/bin/node --config=helper.json --type=renderer app.js'
+# the same rule applies to the name, not just the tests: an argument naming a
+# path inside some other bundle must not become the application
+expect_short 'chrome_crashpad_handler crashpad' \
+  '/opt/google/chrome/chrome_crashpad_handler --database=/tmp/Other.app/db'
+expect_short 'chrome renderer' \
+  '/opt/google/chrome/chrome --type=renderer --user-data-dir=/tmp/Other.app/profile'
 
 group "group classification"
 # drive the real classifier out of the script rather than a copy of it, so this
