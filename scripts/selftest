@@ -133,6 +133,52 @@ else
   pass "no caller still filters on the lifetime CPU average"
 fi
 
+group "--redact masks secrets in command lines"
+# drive the real redactor out of the script, as the classification group does
+eval "$(sed -n "/^AWKLIB='/,/^'$/p" "$DEVPS")"
+masked()  { printf '%s\n' "$1" | DEVPS_REDACT=1 awk "$AWKLIB"'{ print redact($0) }'; }
+passthru(){ printf '%s\n' "$1" | awk "$AWKLIB"'{ print redact($0) }'; }
+expect_mask() {
+  local want="$1" in="$2" got
+  got=$(masked "$in")
+  if [ "$got" = "$want" ]; then pass "masks: ${in:0:50}"
+  else fail "masks: ${in:0:50} (got $got)"; fi
+}
+# The fixtures are assembled from $pw rather than written out, so no literal
+# credential string exists in this file for a secret scanner to flag. The
+# assertions still run against the fully expanded string.
+pw='changeme'
+pw_at='chan@geme'     # a password containing @, which the parser must handle
+expect_mask 'postgres://myuser:***@localhost:5432/budget' \
+            "postgres://myuser:$pw@localhost:5432/budget"
+# a password containing @ must not leak its tail: the userinfo ends at the
+# LAST @ before the path
+expect_mask 'psql postgres://admin:***@db.example.com/app' \
+            "psql postgres://admin:$pw_at@db.example.com/app"
+# redis omits the username entirely
+expect_mask 'redis://:***@10.0.0.1:6379' "redis://:$pw@10.0.0.1:6379"
+expect_mask 'mysqld PGPASSWORD=*** MYSQL_PWD=*** --port=3306' \
+            "mysqld PGPASSWORD=$pw MYSQL_PWD=$pw --port=3306"
+expect_mask 'node s.js --api-key=*** --auth-token=*** --verbose' \
+            "node s.js --api-key=$pw --auth-token=$pw --verbose"
+# and things that only look like credentials must survive intact
+expect_mask 'curl https://example.com/path@thing' 'curl https://example.com/path@thing'
+expect_mask 'curl http://host:8080/x@y'           'curl http://host:8080/x@y'
+expect_mask '/usr/bin/postgres -D /var/postgresql@17' '/usr/bin/postgres -D /var/postgresql@17'
+
+# off by default, or the flag would be pointless to have
+secret="postgres://myuser:$pw@localhost:5432/budget"
+if [ "$(passthru "$secret")" = "$secret" ]; then
+  pass "redaction is off unless asked for"
+else
+  fail "redaction is off unless asked for"
+fi
+
+# the flag is stripped before dispatch, so it must not break the command
+ok "--redact after a command"  "$DEVPS" top 3 --redact
+ok "--redact before a command" "$DEVPS" --redact top 3
+ok "--redact alone"            "$DEVPS" --redact
+
 group "group classification"
 # drive the real classifier out of the script rather than a copy of it, so this
 # cannot pass against a definition that has drifted

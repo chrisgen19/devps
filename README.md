@@ -62,6 +62,53 @@ The `SWAP` column is the point. A dev server you have not touched in five hours 
 
 ## Platforms
 
+The same report on macOS. Rows elided for length; nothing else is changed:
+
+```
+ MACOS RESOURCES  Fri 04 Sep 21:40  up 3 hours, 42 minutes
+
+  RAM    ####################....  82%   13.2G used of 16.0G  (2.8G available)
+  SWAP   ######..................  22%   224M used of 1.0G  (800M free)
+  LOAD   #####...................  18%   2.10 / 2.05 / 2.01  across 12 cores
+
+  all clear
+
+LISTENING PORTS
+     PORT      PID      RAM  PROCESS
+       80      800     464K  nginx: worker process
+      443      800     464K  nginx: worker process
+     3306     1362     7.2M  /opt/homebrew/opt/mysql@8.0/bin/mysqld --basedir=/opt/home
+     5000      674    71.9M  /System/Library/CoreServices/ControlCenter.app/Contents/Ma
+     5432     1145     7.2M  /opt/homebrew/opt/postgresql@17/bin/postgres -D /opt/homeb
+     8025     1136    10.6M  /opt/homebrew/opt/mailpit/bin/mailpit
+     9000     1137     5.9M  php-fpm: master process (/opt/homebrew/etc/php/8.2/php-fpm
+
+GROUPS
+  GROUP         COUNT       RAM      SWAP
+  other           484      5.9G         -   ############
+  browser          60      5.8G         -   ############
+  ai-agent          7      847M         -   ##
+  mcp               7     44.0M         -
+  webserver        24     27.8M         -
+  database          8     24.3M         -
+  TOTAL           590     12.6G         -
+
+TOP PROCESSES
+      PID      RAM     SWAP  GROUP         UPTIME  COMMAND
+    19525     475M        -  ai-agent       2h12m  claude
+      652     353M        -  browser        3h41m  Google Chrome.app/Contents/MacOS/Google Chrome
+    49308     233M        -  other             1m  VLC
+     3404     223M        -  ai-agent       3h11m  claude
+     1366     141M        -  browser        3h40m  com.apple.WebKit.WebContent
+```
+
+Two things that example shows about the port. The `SWAP` column is `-` throughout,
+because Darwin has no per-process swap to report - it says so rather than printing
+a zero that would read as "this process is not swapping". And port 5000 is macOS's
+own AirPlay receiver, which is worth knowing before you spend an afternoon on why
+your dev server will not bind.
+
+
 | | Linux / WSL2 | macOS |
 | --- | --- | --- |
 | Processes, groups, RAM, uptime, load | yes | yes |
@@ -71,6 +118,7 @@ The `SWAP` column is the point. A dev server you have not touched in five hours 
 | Per-process **disk IO** | yes | no - no readable per-process counter |
 | `STALL` / PSI pressure | yes, on a kernel that has it | no - falls back to load average |
 | `projects` | yes | yes |
+| `--redact` | yes | yes |
 | `doctor` | WSL2 only | not applicable |
 
 Where a number cannot be read honestly it is reported as absent rather than
@@ -227,6 +275,26 @@ What it shows that the one-shot report cannot:
 `x` and `t` drop out of the dashboard and run the ordinary `devps kill` and
 `devps tree`, so the preview, the confirmation and every guard below still
 apply. The dashboard itself never signals anything.
+
+### `--redact` before you paste output anywhere
+
+Command lines are shown in full, and yours may carry credentials - a
+`postgres://user:password@host` connection string in an MCP server's arguments,
+a `PGPASSWORD=` in a daemon's environment. `--redact` masks them:
+
+```
+$ devps ports
+     5432    91234    7.2M  npm exec @modelcontextprotocol/server-postgres postgres://app:changeme@localhost:5432/shop
+
+$ devps ports --redact
+     5432    91234    7.2M  npm exec @modelcontextprotocol/server-postgres postgres://app:***@localhost:5432/shop
+```
+
+It masks URL passwords and any `KEY=VALUE` whose key names a password, token,
+secret or api key, and it leaves the username visible because that is the half
+that tells you which service you are looking at. `DEVPS_REDACT=1` does the same
+thing. It is off by default: the full command line is usually what you want on
+your own machine, and the flag is for when the output is going somewhere else.
 
 Colour and block glyphs turn themselves off when the output is not a terminal,
 when `NO_COLOR` is set, or when the locale is not UTF-8. `DEVPS_ASCII=1` keeps
