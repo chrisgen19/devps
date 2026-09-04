@@ -233,7 +233,11 @@ function secs(t,   d, p, n, v, i) {
 AWKCAT='
 function cat(a,   l) {
   l = tolower(a)
-  if (l ~ /mcp/)                                                    return "mcp"
+  # the official packages spell it out: "@modelcontextprotocol/server-postgres"
+  # contains no "mcp", so it used to fall through to the postgres branch and be
+  # counted as a database. Every other spelling in the wild - mcp-server-x,
+  # x-mcp, fastmcp, mcp_server_x - already carries the three letters.
+  if (l ~ /mcp|modelcontextprotocol/)                               return "mcp"
   if (l ~ /(^|\/)claude([ \t]|$)|claude-code|(^|\/)codex([ \t]|$)|cursor-agent/) return "ai-agent"
   if (l ~ /next-server|next dev|\.next\/|vite|nuxt|astro|webpack|remix|(^|\/)turbo([ \t]|$)/) return "dev-server"
   if (l ~ /\/chrome|chromium|firefox|msedge|playwright|puppeteer/)   return "browser"
