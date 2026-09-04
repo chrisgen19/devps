@@ -133,6 +133,33 @@ else
   pass "no caller still filters on the lifetime CPU average"
 fi
 
+group "group classification"
+# drive the real classifier out of the script rather than a copy of it, so this
+# cannot pass against a definition that has drifted
+eval "$(sed -n "/^AWKCAT='/,/^'$/p" "$DEVPS")"
+classify() { printf '%s\n' "$1" | awk "$AWKCAT"'{ print cat($0) }'; }
+expect_group() {
+  local want="$1" cmd="$2" got
+  got=$(classify "$cmd")
+  if [ "$got" = "$want" ]; then
+    pass "$want: ${cmd:0:52}"
+  else
+    fail "$want: ${cmd:0:52} (got $got)"
+  fi
+}
+# the regression: the official packages never spell "mcp"
+expect_group mcp        'npm exec @modelcontextprotocol/server-postgres postgres://u@localhost:5432/db'
+expect_group mcp        'node /home/u/.npm/_npx/ab12/node_modules/.bin/mcp-server-postgres'
+expect_group mcp        'npm exec @playwright/mcp@latest'
+# and the branches it must not have swallowed
+expect_group database   '/opt/homebrew/opt/postgresql@17/bin/postgres -D /opt/homebrew/var/postgresql@17'
+expect_group database   '/usr/sbin/mysqld --basedir=/usr'
+expect_group dev-server 'next-server (v15.5.12)'
+expect_group webserver  'nginx: worker process'
+expect_group browser    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+expect_group ai-agent   'claude'
+expect_group other      '/usr/libexec/secinitd'
+
 group "idle classification"
 # ppid 1 plus a hand-started group is an orphan; system daemons at ppid 1 are
 # not. Drive the predicate directly: a real orphan cannot be conjured here,
