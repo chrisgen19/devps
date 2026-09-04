@@ -67,11 +67,7 @@ ok "group node"   "$DEVPS" group node
 ok "tree self"    "$DEVPS" tree $$
 
 group "pressure, projects and doctor"
-if [ "$PLAT" = Linux ]; then
-  ok "projects"       "$DEVPS" projects
-else
-  rejects "projects refuses rather than mis-attributing" "$DEVPS" projects
-fi
+ok "projects"       "$DEVPS" projects
 linux_only "doctor"     "$DEVPS" doctor
 # PSI thresholds are unreachable on an idle box, so drive them from fixtures
 psidir=$(mktemp -d)
@@ -99,9 +95,6 @@ esac
 rm -rf "$psidir"
 
 group "project attribution reaches deep working directories"
-if [ "$PLAT" != Linux ]; then
-  skip "deep project attribution (Linux only)"
-else
 # a pnpm store or a monorepo package can sit a dozen levels under its own root;
 # a process started down there still belongs to the project
 proj=$(mktemp -d)
@@ -124,7 +117,6 @@ esac
 kill "$deep_pid" 2>/dev/null || true
 wait "$deep_pid" 2>/dev/null || true
 rm -rf "$proj"
-fi
 
 group "the dashboard and the CLI share one idle predicate"
 # they answered the same question differently once: the CLI moved to an
@@ -212,27 +204,15 @@ group "help does not advertise what this platform cannot do"
 # the key span and the view list are derived from DASH_VIEWS, so this catches
 # help drifting away from what the number keys actually do
 help_out=$("$DEVPS" help)
-if [ "$PLAT" = Linux ]; then
-  case "$help_out" in
-    *"1-6 overview, processes, idle, ports, groups, projects"*)
-      pass "help offers all six dashboard views" ;;
-    *) fail "help offers all six dashboard views" ;;
-  esac
-else
-  case "$help_out" in
-    *"1-5 overview, processes, idle, ports, groups"*)
-      pass "help offers five dashboard views, not six" ;;
-    *) fail "help offers five dashboard views, not six" ;;
-  esac
-  case "$help_out" in
-    *"projects"*"(Linux only)"*) pass "help marks projects Linux only" ;;
-    *)                           fail "help marks projects Linux only" ;;
-  esac
-  case "$help_out" in
-    *"1-6"*) fail "help still advertises a sixth view" ;;
-    *)       pass "help does not advertise a sixth view" ;;
-  esac
-fi
+case "$help_out" in
+  *"1-6 overview, processes, idle, ports, groups, projects"*)
+    pass "help offers all six dashboard views" ;;
+  *) fail "help offers all six dashboard views" ;;
+esac
+case "$help_out" in
+  *"(Linux only)"*) fail "help still marks a ported feature Linux only" ;;
+  *)                pass "help marks nothing Linux only" ;;
+esac
 
 group "bad input is rejected"
 rejects "unknown command"   "$DEVPS" bogus

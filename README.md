@@ -70,7 +70,7 @@ The `SWAP` column is the point. A dev server you have not touched in five hours 
 | Per-process **swap** | yes | no - Darwin compresses memory rather than swapping per process |
 | Per-process **disk IO** | yes | no - no readable per-process counter |
 | `STALL` / PSI pressure | yes, on a kernel that has it | no - falls back to load average |
-| `projects` | yes | not yet |
+| `projects` | yes | yes |
 | `doctor` | WSL2 only | not applicable |
 
 Where a number cannot be read honestly it is reported as absent rather than

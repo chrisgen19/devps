@@ -820,7 +820,6 @@ kill_cmd() {
       [ "${#roots[@]}" -gt 0 ] || die "no processes in group '$target'"
       ;;
     project)
-      require_projects
       local hits distinct
       hits=$(project_pids "$target")
       [ -n "${hits//[[:space:]]/}" ] || die "no processes for project '$target' (try: $PROG projects)"
@@ -1012,7 +1011,6 @@ port_cmd() {
 # the selection to the same kill_cmd the CLI uses, guards and confirm included.
 
 DASH_VIEWS="overview procs idle ports groups projects"
-[ "$WS_PLATFORM" = linux ] || DASH_VIEWS="overview procs idle ports groups"
 DASH_VIEW=overview
 DASH_INT=2
 DASH_PAUSED=0
@@ -1831,7 +1829,24 @@ watch_plain() {
 # "unattributed", which is honest rather than silently wrong.
 PROJECT_MARKERS='.git/HEAD .git package.json composer.json go.mod Cargo.toml pyproject.toml'
 
-cwd_map() {
+# every process's working directory as "C<TAB>pid<TAB>dir".
+#
+# Both implementations answer in one call rather than one per pid: on a box
+# with 500 processes the per-pid version costs 500 forks to build a map that is
+# thrown away a moment later. Processes owned by another user are absent from
+# both - Linux gives an unreadable link, Darwin's lsof does not list them.
+cwd_map() { "cwd_map_$WS_PLATFORM"; }
+
+cwd_map_darwin() {
+  # -d cwd restricts to the working-directory descriptor, -Fpn asks for the
+  # field format: one p<pid> line per process, then n<path> for its cwd. -w
+  # silences the warnings lsof would otherwise print for what it cannot open.
+  lsof -w -a -d cwd -Fpn | awk '
+    /^p/ { pid = substr($0, 2); next }
+    /^n/ { if (pid != "") printf "C\t%s\t%s\n", pid, substr($0, 2) }'
+}
+
+cwd_map_linux() {
   # one ls, not one readlink per pid. Processes owned by another user have an
   # unreadable link and simply come back without a " -> " part.
   # shellcheck disable=SC2012  # find would walk into /proc, which costs far more
@@ -1928,19 +1943,8 @@ project_pids() {
     }'
 }
 
-# The cwd map behind all of this reads /proc/<pid>/cwd. Without it every
-# process falls into "(not in a project)", which reads as "attribution failed
-# for each of these" rather than "this does not work here yet".
-require_projects() {
-  [ "$WS_PLATFORM" = linux ] && return 0
-  die "project attribution is not ported to $(uname -s) yet.
-       It maps each process to its working directory, which this build only
-       reads from /proc. try: $PROG top   or   $PROG ports"
-}
-
 projects_cmd() {
   local rows mnt
-  require_projects
   rows=$(project_scan)
   printf '%s%sPROJECTS%s %s(processes grouped by the project directory they run in)%s\n' \
     "" "$C_B" "$C_0" "$C_DIM" "$C_0"
@@ -2231,8 +2235,6 @@ find_vhdx() {
 
 # ------------------------------------------------------------------- help ----
 usage() {
-  local proj_note=""
-  [ "$WS_PLATFORM" = linux ] || proj_note="   ${C_DIM}(Linux only)${C_0}"
   cat <<EOF
 ${C_B}$PROG${C_0} v$VERSION - what this machine is running, and what it costs
 
@@ -2244,7 +2246,7 @@ ${C_B}LOOKING${C_0}
   ${C_C}$PROG top${C_0} [N]              N biggest processes by RAM        (default 15)
   ${C_C}$PROG swap${C_0} [N]             N biggest swap hogs               (default 15)
   ${C_C}$PROG idle${C_0}                 processes doing nothing, or left behind by a closed shell
-  ${C_C}$PROG projects${C_0}             what each project costs, and the ports it owns$proj_note
+  ${C_C}$PROG projects${C_0}             what each project costs, and the ports it owns
   ${C_C}$PROG doctor${C_0}               is this WSL box configured to survive your work
   ${C_C}$PROG group${C_0} <name>         every process in one group
   ${C_C}$PROG ports${C_0}                everything listening
@@ -2284,6 +2286,7 @@ ${C_B}EXAMPLES${C_0}
   $PROG dash                  the live dashboard - watch RAM move, kill from it
   $PROG doctor                why the box died at 3am (memory cap, disk, 9P)
   $PROG swap                  who is paged out - the real cause of slowness
+  $PROG projects              which checkout is costing you, not which process
   $PROG idle                  the dev servers you forgot about, and the orphans
   $PROG port 3111             which project is this, and where does it live
   $PROG kill port 3000        stop that Next dev server cleanly
