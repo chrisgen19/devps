@@ -31,6 +31,7 @@ restore() {
       fi
       ;;
     modified)
+      rm -f "$SCRIPT.bak" || true
       git reset -q -- "$SCRIPT" || true
       git checkout -q -- "$SCRIPT" || true
       printf 'bump: restored %s, nothing was committed\n' "$SCRIPT" >&2
@@ -86,7 +87,13 @@ orig_head=$(git rev-parse --verify -q HEAD || true)
 printf 'bumping %s -> %s\n' "$current" "$new"
 
 stage=modified
-sed -i "s/^VERSION=$current$/VERSION=$new/" "$SCRIPT"
+# -i takes a mandatory suffix on BSD sed and an optional one on GNU, so an
+# explicit .bak is the only spelling both accept. Without it BSD reads the
+# expression as the suffix and the filename as the script, and bump cannot run
+# on a Mac at all. Rewriting in place rather than through a temp file keeps the
+# executable bit, which the release workflow checks for.
+sed -i.bak "s/^VERSION=$current$/VERSION=$new/" "$SCRIPT"
+rm -f "$SCRIPT.bak"
 
 check=$(sed -n 's/^VERSION=\(.*\)$/\1/p' "$SCRIPT" | head -1)
 [ "$check" = "$new" ] || die "rewrite failed, $SCRIPT still reports $check"
