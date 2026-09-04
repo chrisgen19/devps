@@ -7,7 +7,7 @@
 # wslps symlink still describes itself as wslps in its own help and errors.
 
 set -uo pipefail
-VERSION=2.2.0
+VERSION=2.3.0
 PROG=${0##*/}
 
 # ---------------------------------------------------------------- colour ----
