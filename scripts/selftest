@@ -348,6 +348,15 @@ if ( cd "$tmp/repo" \
     pass "bump failed as expected"
   fi
 
+  # bump has to fail at the commit, which is what this group is about. On macOS
+  # it used to die earlier, in the sed - GNU-only -i - and every assertion below
+  # then passed without the rollback path running at all. A sed error in the
+  # output means the fixture is testing nothing.
+  case "$(cat "$tmp/bump.err")" in
+    *sed:*) fail "bump got as far as the commit (it died in sed first)" ;;
+    *)      pass "bump got as far as the commit" ;;
+  esac
+
   after=$(sed -n 's/^VERSION=\(.*\)$/\1/p' "$tmp/repo/devps" | head -1)
   if [ "$before" = "$after" ]; then
     pass "VERSION was restored ($after)"
