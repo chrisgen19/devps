@@ -255,6 +255,107 @@ pid_alive() {
   fi
 }
 
+# What the header calls the box. Purely cosmetic, but "WSL RESOURCES" over a
+# macOS process list is a lie the rest of the output has to live down.
+case "$WS_PLATFORM" in
+  darwin) WS_LABEL="MACOS" ;;
+  *)      WS_LABEL="WSL"   ;;
+esac
+
+cpu_cores_linux()  { nproc; }
+cpu_cores_darwin() { sysctl -n hw.ncpu; }
+cpu_cores() { "cpu_cores_$WS_PLATFORM"; }
+
+# three space separated averages, 1 / 5 / 15 minutes
+loadavg_linux()  { local a b c; read -r a b c _ < /proc/loadavg; printf '%s %s %s\n' "$a" "$b" "$c"; }
+loadavg_darwin() { sysctl -n vm.loadavg | tr -d '{}'; }
+loadavg() { "loadavg_$WS_PLATFORM"; }
+
+uptime_secs_linux()  { local s; read -r s _ < /proc/uptime; printf '%d\n' "${s%%.*}"; }
+uptime_secs_darwin() {
+  local b
+  # anchored at the brace: an unanchored .*sec runs greedily to usec instead
+  b=$(sysctl -n kern.boottime | sed -n 's/^{ *sec *= *\([0-9]*\).*/\1/p')
+  [ -n "$b" ] || { printf '0\n'; return; }
+  printf '%d\n' "$(( $(date +%s) - b ))"
+}
+uptime_secs() { "uptime_secs_$WS_PLATFORM"; }
+
+# "5 hours, 15 minutes" - Darwin has no uptime -p, so the phrasing is rebuilt
+# rather than the format changed, which would move it on Linux too
+uptime_pretty_linux() { uptime -p | sed 's/^up //'; }
+uptime_pretty_darwin() {
+  local s d h m out=""
+  s=$(uptime_secs)
+  d=$(( s / 86400 )); h=$(( s % 86400 / 3600 )); m=$(( s % 3600 / 60 ))
+  [ "$d" -gt 0 ] && out="$d $(plural day "$d")"
+  [ "$h" -gt 0 ] && out="${out:+$out, }$h $(plural hour "$h")"
+  if [ "$m" -gt 0 ] || [ -z "$out" ]; then out="${out:+$out, }$m $(plural minute "$m")"; fi
+  printf '%s\n' "$out"
+}
+plural() { if [ "$2" = 1 ]; then printf '%s' "$1"; else printf '%ss' "$1"; fi; }
+uptime_pretty() { "uptime_pretty_$WS_PLATFORM"; }
+
+# processes blocked in an uninterruptible wait - Linux calls that state D,
+# Darwin calls it U. Only consulted on a kernel without PSI.
+# pgrep cannot filter on process state, so ps + grep is the right tool here
+# shellcheck disable=SC2009
+dstate_count_linux()  { ps -eo stat= | grep -c '^D' || true; }
+# shellcheck disable=SC2009
+dstate_count_darwin() { ps -eo stat= | grep -c '^U' || true; }
+dstate_count() { "dstate_count_$WS_PLATFORM"; }
+
+# total / available / swap total / swap free, in KB, on one line.
+#
+# Linux publishes MemAvailable. Darwin does not, so it is rebuilt from vm_stat
+# as free plus the page classes the kernel can reclaim without swapping:
+# inactive (largely file backed), speculative and purgeable. That follows what
+# MemAvailable means rather than what Activity Monitor shows, which counts
+# compressed pages as used and would not compare against the Linux number.
+#
+# Page size comes out of vm_stat's own header: 16K on Apple silicon, 4K on
+# Intel, and hardcoding either is wrong on the other machine.
+darwin_mem_kb() {
+  local memsize swap
+  memsize=$(sysctl -n hw.memsize)
+  swap=$(sysctl -n vm.swapusage)
+  vm_stat | awk -v memsize="$memsize" -v swap="$swap" '
+    function kb(v,   n, u) {
+      n = v + 0; u = substr(v, length(v))
+      if (u == "G") return n * 1048576
+      if (u == "M") return n * 1024
+      if (u == "K") return n
+      return n / 1024
+    }
+    NR == 1 && match($0, /page size of [0-9]+/) {
+      ps = substr($0, RSTART + 13, RLENGTH - 13) + 0
+    }
+    /^Pages free:/        { free  = $3 + 0 }
+    /^Pages inactive:/    { inact = $3 + 0 }
+    /^Pages speculative:/ { spec  = $3 + 0 }
+    /^Pages purgeable:/   { purg  = $3 + 0 }
+    END {
+      if (ps <= 0) ps = 4096
+      split(swap, w, " ")     # total = N  used = N  free = N  (encrypted)
+      printf "%d %d %d %d\n", memsize / 1024,
+             (free + inact + spec + purg) * ps / 1024, kb(w[3]), kb(w[9])
+    }'
+}
+
+meminfo_linux() { awk -v k="$1" '$1 == k":" { print $2; exit }' /proc/meminfo; }
+meminfo_darwin() {
+  local t a st sf
+  read -r t a st sf <<< "$(darwin_mem_kb)"
+  case "$1" in
+    MemTotal)     printf '%s\n' "${t:-1}"  ;;
+    MemAvailable) printf '%s\n' "${a:-0}"  ;;
+    SwapTotal)    printf '%s\n' "${st:-0}" ;;
+    SwapFree)     printf '%s\n' "${sf:-0}" ;;
+    *)            printf '0\n'             ;;
+  esac
+}
+meminfo() { "meminfo_$WS_PLATFORM" "$@"; }
+
 # the group list, each name in its own colour - doubles as the colour legend
 group_legend() {
   local g out=""
@@ -320,8 +421,6 @@ psi_cell() {
 }
 
 # ---------------------------------------------------------------- helpers ----
-meminfo() { awk -v k="$1" '$1 == k":" { print $2; exit }' /proc/meminfo; }
-
 bar() {
   local pm
   pm=$(awk -v u="$1" -v t="$2" 'BEGIN{
@@ -429,14 +528,12 @@ header() {
   local mt ma st sf su l1 l5 l15 cores dstate warned=0
   mt=$(meminfo MemTotal);  ma=$(meminfo MemAvailable)
   st=$(meminfo SwapTotal); sf=$(meminfo SwapFree); su=$(( st - sf ))
-  read -r l1 l5 l15 _ < /proc/loadavg
-  cores=$(nproc)
-  # pgrep cannot filter on process state, so ps + grep is the right tool here
-  # shellcheck disable=SC2009
-  dstate=$(ps -eo stat= | grep -c '^D' || true)
+  read -r l1 l5 l15 <<< "$(loadavg)"
+  cores=$(cpu_cores)
+  dstate=$(dstate_count)
 
-  printf '%s%s WSL RESOURCES %s %s%s  up %s%s\n\n' "$C_B" "$C_C" "$C_0" \
-    "$C_DIM" "$(date '+%a %d %b %H:%M')" "$(uptime -p | sed 's/^up //')" "$C_0"
+  printf '%s%s %s RESOURCES %s %s%s  up %s%s\n\n' "$C_B" "$C_C" "$WS_LABEL" "$C_0" \
+    "$C_DIM" "$(date '+%a %d %b %H:%M')" "$(uptime_pretty)" "$C_0"
   printf '  %-6s %s   %s used of %s  %s(%s available)%s\n' "RAM" \
     "$(bar $(( mt - ma )) "$mt")" "$(hum_kb $(( mt - ma )))" "$(hum_kb "$mt")" \
     "$C_DIM" "$(hum_kb "$ma")" "$C_0"
@@ -635,17 +732,6 @@ tree_cmd() {
 
 # ------------------------------------------------------------------- kill ----
 kill_cmd() {
-  # Stopping things is still Linux only. The preview below asks ps for etimes
-  # and reads /proc/<pid>/status for the freed-memory figure, and neither
-  # exists on Darwin: BSD ps drops the unknown column and shifts args left, so
-  # the confirmation would name the wrong command, show 0m uptime and claim a
-  # real kill frees 0K. Until that preview is portable this refuses, which is
-  # what the /proc readability test used to do here by accident.
-  if [ "$WS_PLATFORM" != linux ]; then
-    die "kill is not ported to $(uname -s) yet - its preview cannot be trusted here.
-       find the process with 'wslps top' and stop it with kill(1) directly."
-  fi
-
   local kind="" target="" assume_yes=0 sig=TERM dry=0 a r p
   local -a roots=() pids=() skipped=() all=() climbed=()
 
@@ -727,24 +813,29 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
     return 1
   fi
 
+  # One snapshot answers both the table and the totals. It used to fork a ps
+  # per victim for the rows and re-read /proc/<pid>/status for the cost, which
+  # asked the kernel for the same numbers twice and tied the preview to Linux.
+  # snapshot already carries pid, rss, swap, etimes and args for both.
+  #
+  # A victim missing from the snapshot still gets a row. It is a pid we are
+  # about to signal, and silently dropping it would understate what is being
+  # stopped - the same failure as showing no rows at all.
+  local vic
+  vic=$( { printf 'P\t%s\n' "${pids[@]}"; snapshot; } | awk -F'\t' '
+    $1 == "P" { want[$2] = 1; order[++n] = $2; next }
+    ($1 in want) { seen[$1] = 1; print }
+    END { for (i = 1; i <= n; i++)
+            if (!(order[i] in seen)) printf "%s\t0\t0\t0\t0\t?\t?\n", order[i] }')
+
   printf '%sWILL STOP%s  %s(SIG%s)%s\n' "$C_B" "$C_0" "$C_DIM" "$sig" "$C_0"
-  for p in "${pids[@]}"; do
-    if pid_alive "$p"; then ps -o pid=,rss=,etimes=,args= -p "$p"; fi
-  done | awk "$AWKLIB"'
+  printf '%s\n' "$vic" | awk -F'\t' "$AWKLIB"'
     BEGIN { printf "  %7s %8s %8s  %s\n", "PID", "RAM", "UPTIME", "COMMAND" }
-    { a = ""; for (i = 4; i <= NF; i++) a = a (i > 4 ? " " : "") $i
-      printf "  %7s %8s %8s  %s\n", $1, hum($2), dur($3), shorten(a, 56) }'
+    { printf "  %7s %8s %8s  %s\n", $1, hum($2), dur($4), shorten($7, 56) }'
 
   local freed
-  freed=$(printf '%s\n' "${pids[@]}" | awk '
-    BEGIN { r = 0; s = 0 }
-    { f = "/proc/" $1 "/status"
-      while ((getline l < f) > 0) {
-        if (l ~ /^VmRSS:/)  { split(l, x, /[ \t]+/); r += x[2] }
-        if (l ~ /^VmSwap:/) { split(l, x, /[ \t]+/); s += x[2] }
-      }
-      close(f) }
-    END { print r "+" s }')
+  freed=$(printf '%s\n' "$vic" | awk -F'\t' '
+    { r += $2; s += $3 } END { print r "+" s }')
   printf '  %s%d process(es), frees about %s RAM and %s swap%s\n' "$C_DIM" \
     "${#pids[@]}" "$(hum_kb "${freed%%+*}")" "$(hum_kb "${freed##*+}")" "$C_0"
 
@@ -918,8 +1009,7 @@ ALERTS=()
 
 uptime_h() {
   local s d h m
-  read -r s _ < /proc/uptime
-  s=${s%%.*}
+  s=$(uptime_secs)
   d=$(( s / 86400 )); h=$(( s % 86400 / 3600 )); m=$(( s % 3600 / 60 ))
   if   [ "$d" -gt 0 ]; then printf 'up %dd%dh' "$d" "$h"
   elif [ "$h" -gt 0 ]; then printf 'up %dh%02dm' "$h" "$m"
@@ -927,7 +1017,15 @@ uptime_h() {
   fi
 }
 
-read_mem() {
+read_mem() { "read_mem_$WS_PLATFORM"; [ "$MEM_T" -gt 0 ] || MEM_T=1; }
+
+read_mem_darwin() {
+  local t a st sf
+  read -r t a st sf <<< "$(darwin_mem_kb)"
+  MEM_T=${t:-1}; MEM_A=${a:-0}; SW_T=${st:-0}; SW_F=${sf:-0}
+}
+
+read_mem_linux() {
   local k v
   MEM_T=1; MEM_A=0; SW_T=0; SW_F=0
   while read -r k v _; do
@@ -938,12 +1036,42 @@ read_mem() {
       SwapFree:)     SW_F=$v; break ;;
     esac
   done < /proc/meminfo
-  [ "$MEM_T" -gt 0 ] || MEM_T=1
 }
 
 # whole-box CPU from the delta between two /proc/stat reads - the real number,
 # not the lifetime average ps reports
-read_cpu() {
+read_cpu() { "read_cpu_$WS_PLATFORM"; }
+
+# Darwin publishes no cumulative CPU counter - there is no kern.cp_time, and
+# iostat would cost a blocking second per tick. The delta of every process's
+# CPU time over the wall clock between two samples measures the same thing
+# from the other end: busy ticks divided by the ticks the cores could have
+# served. It misses kernel time no process is charged for, so it reads a
+# little low, and a process exiting between samples shrinks the sum - which
+# clamps to 0 rather than showing a negative spike.
+CPU_PREV_US=0
+read_cpu_darwin() {
+  local tot us dt_us cap d_tot
+  tot=$(ps -eo time= | awk '
+    { n = split($1, p, ":"); v = 0
+      if ($1 ~ /-/) { split($1, q, "-"); n = split(q[2], p, ":"); v = q[1] * 86400 }
+      for (i = 1; i <= n; i++) v = v * 60 + (p[i] + 0)
+      s += v }
+    END { printf "%d", s * 100 }')
+  us=${EPOCHREALTIME/[.,]/}
+  dt_us=$(( us - CPU_PREV_US ))
+  d_tot=$(( tot - CPU_PREV_TOT ))
+  if [ "$CPU_PREV_US" -gt 0 ] && [ "$dt_us" -gt 0 ]; then
+    # ticks the box could have served: cores * 100 ticks/s * dt
+    cap=$(( $(cpu_cores) * dt_us / 10000 ))
+    [ "$cap" -gt 0 ] && TGT_CPU=$(( d_tot * 1000 / cap ))
+    [ "$TGT_CPU" -lt 0 ] && TGT_CPU=0
+    [ "$TGT_CPU" -gt 1000 ] && TGT_CPU=1000
+  fi
+  CPU_PREV_TOT=$tot; CPU_PREV_US=$us
+}
+
+read_cpu_linux() {
   local u n s i rest v tot idle d_tot d_idle
   read -r _ u n s i rest < /proc/stat
   tot=$(( u + n + s + i ))
@@ -978,13 +1106,11 @@ dash_sample() {
   WS_IO=1
   read_mem; read_cpu
   UPSTR=$(uptime_h)
-  read -r L1 L5 L15 _ < /proc/loadavg
+  read -r L1 L5 L15 <<< "$(loadavg)"
   psi_read || true
   if [ "$PSI_OK" != 1 ]; then
     # only worth a fork on a kernel with no PSI, where it is the best proxy
-    # pgrep cannot filter on process state, so ps + grep is the right tool here
-    # shellcheck disable=SC2009
-    DSTATE=$(ps -eo stat= | grep -c '^D' || true)
+    DSTATE=$(dstate_count)
   fi
 
   TGT_RAM=$(( (MEM_T - MEM_A) * 1000 / MEM_T ))

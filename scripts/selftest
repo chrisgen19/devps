@@ -17,6 +17,16 @@ fails=0
 pass() { printf '  ok    %s\n' "$1"; }
 fail() { printf '  FAIL  %s\n' "$1" >&2; fails=$(( fails + 1 )); }
 group() { printf '\n%s\n' "$1"; }
+skip()  { printf '  skip  %s\n' "$1"; }
+
+# Ports, projects and doctor still read /proc and iproute2, so on Darwin they
+# are reported skipped rather than quietly not run - a green macOS build that
+# silently tested two thirds of the suite would be worse than a red one.
+PLAT=$(uname -s)
+linux_only() {
+  local desc="$1"; shift
+  if [ "$PLAT" = Linux ]; then ok "$desc" "$@"; else skip "$desc (Linux only)"; fi
+}
 
 # ok <description> <command...>   - command must succeed
 ok() {
@@ -33,7 +43,11 @@ rejects() {
 [ -x "$WSLPS" ] || { echo "selftest: no executable $WSLPS here" >&2; exit 1; }
 
 group "dependencies"
-for t in ps pgrep ss awk; do
+for t in ps pgrep awk; do
+  if command -v "$t" > /dev/null; then pass "$t present"; else fail "$t missing"; fi
+done
+if [ "$PLAT" = Linux ]; then deps="ss"; else deps="sysctl vm_stat"; fi
+for t in $deps; do
   if command -v "$t" > /dev/null; then pass "$t present"; else fail "$t missing"; fi
 done
 
@@ -44,13 +58,13 @@ ok "report"       "$WSLPS"
 ok "top"          "$WSLPS" top 5
 ok "swap"         "$WSLPS" swap 5
 ok "idle"         "$WSLPS" idle
-ok "ports"        "$WSLPS" ports
+linux_only "ports"   "$WSLPS" ports
 ok "group node"   "$WSLPS" group node
 ok "tree self"    "$WSLPS" tree $$
 
 group "pressure, projects and doctor"
-ok "projects"        "$WSLPS" projects
-ok "doctor"          "$WSLPS" doctor
+linux_only "projects"   "$WSLPS" projects
+linux_only "doctor"     "$WSLPS" doctor
 # PSI thresholds are unreachable on an idle box, so drive them from fixtures
 psidir=$(mktemp -d)
 printf 'some avg10=12.34 avg60=1.03 avg300=1.83 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n' > "$psidir/cpu"
@@ -77,6 +91,9 @@ esac
 rm -rf "$psidir"
 
 group "project attribution reaches deep working directories"
+if [ "$PLAT" != Linux ]; then
+  skip "deep project attribution (Linux only)"
+else
 # a pnpm store or a monorepo package can sit a dozen levels under its own root;
 # a process started down there still belongs to the project
 proj=$(mktemp -d)
@@ -99,6 +116,7 @@ esac
 kill "$deep_pid" 2>/dev/null || true
 wait "$deep_pid" 2>/dev/null || true
 rm -rf "$proj"
+fi
 
 group "the dashboard and the CLI share one idle predicate"
 # they answered the same question differently once: the CLI moved to an
@@ -146,11 +164,20 @@ group "the dashboard degrades without a terminal"
 # something rather than sitting on a keyboard that will never arrive
 # pipefail is on, and timeout exits 124 when it does its job, so read the
 # output into a variable rather than testing the pipeline's status
-dash_out=$(timeout 3 "$WSLPS" dash 1 | head -3) || true
-if printf '%s' "$dash_out" | grep -q "WSL RESOURCES"; then
-  pass "dash falls back to a plain report over a pipe"
+if   command -v timeout  > /dev/null; then TIMEOUT=timeout
+elif command -v gtimeout > /dev/null; then TIMEOUT=gtimeout
+else TIMEOUT=""
+fi
+if [ "$PLAT" = Linux ]; then want_label="WSL RESOURCES"; else want_label="MACOS RESOURCES"; fi
+if [ -z "$TIMEOUT" ]; then
+  skip "dash falls back to a plain report over a pipe (no timeout(1))"
 else
-  fail "dash falls back to a plain report over a pipe"
+  dash_out=$($TIMEOUT 3 "$WSLPS" dash 1 | head -3) || true
+  if printf '%s' "$dash_out" | grep -q "$want_label"; then
+    pass "dash falls back to a plain report over a pipe"
+  else
+    fail "dash falls back to a plain report over a pipe"
+  fi
 fi
 ok "ascii mode renders"   env WSLPS_ASCII=1 "$WSLPS" top 3
 ok "report with a fake dumb terminal" env TERM=dumb "$WSLPS" top 3
@@ -160,9 +187,11 @@ rejects "unknown command"   "$WSLPS" bogus
 rejects "unknown group"     "$WSLPS" group nope
 rejects "kill with no args" "$WSLPS" kill
 rejects "non-numeric pid"   "$WSLPS" kill pid abc
-rejects "unused port"       "$WSLPS" port 65999
+if [ "$PLAT" = Linux ]; then rejects "unused port" "$WSLPS" port 65999
+else skip "unused port (Linux only)"; fi
 rejects "non-numeric dash interval" "$WSLPS" dash xyz
-rejects "unknown project"   "$WSLPS" kill project __no_such_project__ -y
+if [ "$PLAT" = Linux ]; then rejects "unknown project" "$WSLPS" kill project __no_such_project__ -y
+else skip "unknown project (Linux only)"; fi
 
 group "version bumper rejects malformed versions"
 for v in 1.2 1.2.3.4 1.2.3.4.5 sideways 1..3 01.2.3 1.02.3 2.0.08 ""; do
