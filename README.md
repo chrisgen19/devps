@@ -468,7 +468,22 @@ Processes are bucketed by command line, first match wins:
 | `system` | The OS's own processes. Executable under `/System/`, `/Library/Apple/`, `/usr/libexec/`, `/usr/sbin/`, `/usr/lib/`, `/sbin/` or `/lib/`; or named `com.apple.*`; or a bare `systemd`, `systemd-*`, `launchd`, `dbus-daemon`, `rsyslogd`, `udevd`, `agetty`, `sshd`, `cron` |
 | `other` | Everything else - which, with `system` split out, means things you installed and started |
 
-Kernel threads are excluded. Every rule above is matched against the
+Kernel threads are excluded.
+
+Chromium and Electron apps - Chrome, VS Code, Slack, Docker Desktop - run one
+process per tab, per GPU context and per utility service, all of them execing
+the same helper binary several directories inside the bundle. Truncated to a
+column width those render as two dozen identical rows, so they collapse to the
+application and the process type instead:
+
+```
+Google Chrome.app/Contents/Frameworks/Google Chro...   ->  Google Chrome renderer
+Google Chrome.app/Contents/Frameworks/Google Chro...   ->  Google Chrome gpu
+Google Chrome.app/Contents/Frameworks/Google Chro...   ->  Google Chrome utility NetworkService
+```
+
+Only the process types Chromium actually uses count, so `mount --type=ext4` is
+left alone. Every rule above is matched against the
 **executable** only, never the arguments - `/opt/tool --name com.apple.fake` is
 not a system process, and `/home/alice/cron` is not cron.
 

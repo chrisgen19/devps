@@ -179,6 +179,33 @@ ok "--redact after a command"  "$DEVPS" top 3 --redact
 ok "--redact before a command" "$DEVPS" --redact top 3
 ok "--redact alone"            "$DEVPS" --redact
 
+group "multi-process app helpers collapse to app plus type"
+# Chromium and Electron run one helper per tab, GPU context and utility
+# service, all execing the same binary deep inside the bundle. Left alone,
+# two dozen rows render as the same truncated path.
+eval "$(sed -n "/^AWKLIB='/,/^'$/p" "$DEVPS")"
+expect_short() {
+  local want="$1" in="$2" got
+  got=$(printf '%s\n' "$in" | awk "$AWKLIB"'{ print shorten($0, 60) }')
+  if [ "$got" = "$want" ]; then pass "shorten: $want"
+  else fail "shorten: want [$want] got [$got]"; fi
+}
+chrome=/Applications/Google\ Chrome.app/Contents/Frameworks/Google\ Chrome\ Framework.framework/Versions/152/Helpers
+expect_short 'Google Chrome renderer' \
+  "$chrome/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer --lang=en-US"
+expect_short 'Google Chrome gpu' \
+  "$chrome/Google Chrome Helper (GPU).app/Contents/MacOS/Google Chrome Helper (GPU) --type=gpu-process"
+expect_short 'Google Chrome utility NetworkService' \
+  "$chrome/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper --type=utility --utility-sub-type=network.mojom.NetworkService"
+# any Electron app, not just Chrome
+expect_short 'Visual Studio Code renderer' \
+  '/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Renderer).app/Contents/MacOS/Code Helper (Renderer) --type=renderer'
+# no .app bundle on Linux, so the executable name stands in
+expect_short 'chrome renderer' '/opt/google/chrome/chrome --type=renderer --lang=en-US'
+# and --type= belongs to plenty of things that are not helpers
+expect_short 'mount --type=ext4 /dev/sda1 /mnt' '/bin/mount --type=ext4 /dev/sda1 /mnt'
+expect_short 'node server.js --port 3000'       '/usr/bin/node server.js --port 3000'
+
 group "group classification"
 # drive the real classifier out of the script rather than a copy of it, so this
 # cannot pass against a definition that has drifted
