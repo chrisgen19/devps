@@ -328,9 +328,18 @@ dstate_count() { "dstate_count_$WS_PLATFORM"; }
 #
 # Linux publishes MemAvailable. Darwin does not, so it is rebuilt from vm_stat
 # as free plus the page classes the kernel can reclaim without swapping:
-# inactive (largely file backed), speculative and purgeable. That follows what
+# inactive (largely file backed) and speculative. That follows what
 # MemAvailable means rather than what Activity Monitor shows, which counts
 # compressed pages as used and would not compare against the Linux number.
+#
+# Purgeable is deliberately not added. It is a volatility attribute of a VM
+# object, not a page queue: memory_pressure(1) lists active, inactive,
+# speculative, throttled and wired under "Page Q counts" and leaves purgeable
+# out for that reason. Its pages are already counted on the queue they sit on,
+# so adding it double counts them and overstates what is available - which for
+# a tool whose job is warning about memory pressure is the dangerous direction
+# to be wrong in. Erring low costs a warning too early; erring high costs the
+# warning entirely.
 #
 # Page size comes out of vm_stat's own header: 16K on Apple silicon, 4K on
 # Intel, and hardcoding either is wrong on the other machine.
@@ -352,12 +361,11 @@ darwin_mem_kb() {
     /^Pages free:/        { free  = $3 + 0 }
     /^Pages inactive:/    { inact = $3 + 0 }
     /^Pages speculative:/ { spec  = $3 + 0 }
-    /^Pages purgeable:/   { purg  = $3 + 0 }
     END {
       if (ps <= 0) ps = 4096
       split(swap, w, " ")     # total = N  used = N  free = N  (encrypted)
       printf "%d %d %d %d\n", memsize / 1024,
-             (free + inact + spec + purg) * ps / 1024, kb(w[3]), kb(w[9])
+             (free + inact + spec) * ps / 1024, kb(w[3]), kb(w[9])
     }'
 }
 
@@ -812,6 +820,7 @@ kill_cmd() {
       [ "${#roots[@]}" -gt 0 ] || die "no processes in group '$target'"
       ;;
     project)
+      require_projects
       local hits distinct
       hits=$(project_pids "$target")
       [ -n "${hits//[[:space:]]/}" ] || die "no processes for project '$target' (try: $PROG projects)"
@@ -1003,6 +1012,7 @@ port_cmd() {
 # the selection to the same kill_cmd the CLI uses, guards and confirm included.
 
 DASH_VIEWS="overview procs idle ports groups projects"
+[ "$WS_PLATFORM" = linux ] || DASH_VIEWS="overview procs idle ports groups"
 DASH_VIEW=overview
 DASH_INT=2
 DASH_PAUSED=0
@@ -1626,7 +1636,12 @@ dash_resize() {
   dash_build
 }
 
-dash_goto() { DASH_VIEW="$1"; DASH_SEL=0; DASH_TOP=0; dash_build; }
+# the number keys name views directly, so an unavailable one is refused here
+# rather than in six places
+dash_goto() {
+  case " $DASH_VIEWS " in *" $1 "*) ;; *) return 0 ;; esac
+  DASH_VIEW="$1"; DASH_SEL=0; DASH_TOP=0; dash_build
+}
 
 dash_view_step() {
   local -a v
@@ -1905,8 +1920,19 @@ project_pids() {
     }'
 }
 
+# The cwd map behind all of this reads /proc/<pid>/cwd. Without it every
+# process falls into "(not in a project)", which reads as "attribution failed
+# for each of these" rather than "this does not work here yet".
+require_projects() {
+  [ "$WS_PLATFORM" = linux ] && return 0
+  die "project attribution is not ported to $(uname -s) yet.
+       It maps each process to its working directory, which this build only
+       reads from /proc. try: $PROG top   or   $PROG ports"
+}
+
 projects_cmd() {
   local rows mnt
+  require_projects
   rows=$(project_scan)
   printf '%s%sPROJECTS%s %s(processes grouped by the project directory they run in)%s\n' \
     "" "$C_B" "$C_0" "$C_DIM" "$C_0"

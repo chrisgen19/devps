@@ -67,7 +67,11 @@ ok "group node"   "$DEVPS" group node
 ok "tree self"    "$DEVPS" tree $$
 
 group "pressure, projects and doctor"
-linux_only "projects"   "$DEVPS" projects
+if [ "$PLAT" = Linux ]; then
+  ok "projects"       "$DEVPS" projects
+else
+  rejects "projects refuses rather than mis-attributing" "$DEVPS" projects
+fi
 linux_only "doctor"     "$DEVPS" doctor
 # PSI thresholds are unreachable on an idle box, so drive them from fixtures
 psidir=$(mktemp -d)
@@ -211,8 +215,7 @@ rejects "kill with no args" "$DEVPS" kill
 rejects "non-numeric pid"   "$DEVPS" kill pid abc
 rejects "unused port"       "$DEVPS" port 65999
 rejects "non-numeric dash interval" "$DEVPS" dash xyz
-if [ "$PLAT" = Linux ]; then rejects "unknown project" "$DEVPS" kill project __no_such_project__ -y
-else skip "unknown project (Linux only)"; fi
+rejects "unknown project"   "$DEVPS" kill project __no_such_project__ -y
 
 group "version bumper rejects malformed versions"
 for v in 1.2 1.2.3.4 1.2.3.4.5 sideways 1..3 01.2.3 1.02.3 2.0.08 ""; do
