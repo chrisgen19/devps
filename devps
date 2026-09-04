@@ -206,7 +206,7 @@ function shorten(a, w,   s) {
 }
 '
 
-WS_GROUPS="mcp ai-agent dev-server browser editor database webserver node other"
+DP_GROUPS="mcp ai-agent dev-server browser editor database webserver node other"
 
 # The group classifier, shared by every snapshot implementation. A process must
 # land in the same group whichever kernel reported it, or the group table means
@@ -261,9 +261,9 @@ function cat(a,   l) {
 # A platform that cannot answer a column reports 0 rather than guessing - a
 # wrong swap figure is worse than an absent one.
 case "$(uname -s)" in
-  Linux)  WS_PLATFORM=linux  ;;
-  Darwin) WS_PLATFORM=darwin ;;
-  *)      WS_PLATFORM=linux  ;;   # best effort - assume a /proc filesystem
+  Linux)  DP_PLATFORM=linux  ;;
+  Darwin) DP_PLATFORM=darwin ;;
+  *)      DP_PLATFORM=linux  ;;   # best effort - assume a /proc filesystem
 esac
 
 # Does this pid still exist. Linux keeps the cheap read: /proc/<pid>/stat is
@@ -271,7 +271,7 @@ esac
 # equivalent with those same semantics - kill -0 is not, it fails with EPERM
 # on a live process owned by another user, which would read here as death.
 pid_alive() {
-  if [ "$WS_PLATFORM" = linux ]; then
+  if [ "$DP_PLATFORM" = linux ]; then
     [ -r "/proc/$1/stat" ]
   else
     ps -o pid= -p "$1" >/dev/null
@@ -280,19 +280,19 @@ pid_alive() {
 
 # What the header calls the box. Purely cosmetic, but "WSL RESOURCES" over a
 # macOS process list is a lie the rest of the output has to live down.
-case "$WS_PLATFORM" in
-  darwin) WS_LABEL="MACOS" ;;
-  *)      WS_LABEL="WSL"   ;;
+case "$DP_PLATFORM" in
+  darwin) DP_LABEL="MACOS" ;;
+  *)      DP_LABEL="WSL"   ;;
 esac
 
 cpu_cores_linux()  { nproc; }
 cpu_cores_darwin() { sysctl -n hw.ncpu; }
-cpu_cores() { "cpu_cores_$WS_PLATFORM"; }
+cpu_cores() { "cpu_cores_$DP_PLATFORM"; }
 
 # three space separated averages, 1 / 5 / 15 minutes
 loadavg_linux()  { local a b c; read -r a b c _ < /proc/loadavg; printf '%s %s %s\n' "$a" "$b" "$c"; }
 loadavg_darwin() { sysctl -n vm.loadavg | tr -d '{}'; }
-loadavg() { "loadavg_$WS_PLATFORM"; }
+loadavg() { "loadavg_$DP_PLATFORM"; }
 
 uptime_secs_linux()  { local s; read -r s _ < /proc/uptime; printf '%d\n' "${s%%.*}"; }
 uptime_secs_darwin() {
@@ -302,7 +302,7 @@ uptime_secs_darwin() {
   [ -n "$b" ] || { printf '0\n'; return; }
   printf '%d\n' "$(( $(date +%s) - b ))"
 }
-uptime_secs() { "uptime_secs_$WS_PLATFORM"; }
+uptime_secs() { "uptime_secs_$DP_PLATFORM"; }
 
 # "5 hours, 15 minutes" - Darwin has no uptime -p, so the phrasing is rebuilt
 # rather than the format changed, which would move it on Linux too
@@ -317,7 +317,7 @@ uptime_pretty_darwin() {
   printf '%s\n' "$out"
 }
 plural() { if [ "$2" = 1 ]; then printf '%s' "$1"; else printf '%ss' "$1"; fi; }
-uptime_pretty() { "uptime_pretty_$WS_PLATFORM"; }
+uptime_pretty() { "uptime_pretty_$DP_PLATFORM"; }
 
 # processes blocked in an uninterruptible wait - Linux calls that state D,
 # Darwin calls it U. Only consulted on a kernel without PSI.
@@ -326,7 +326,7 @@ uptime_pretty() { "uptime_pretty_$WS_PLATFORM"; }
 dstate_count_linux()  { ps -eo stat= | grep -c '^D' || true; }
 # shellcheck disable=SC2009
 dstate_count_darwin() { ps -eo stat= | grep -c '^U' || true; }
-dstate_count() { "dstate_count_$WS_PLATFORM"; }
+dstate_count() { "dstate_count_$DP_PLATFORM"; }
 
 # total / available / swap total / swap free, in KB, on one line.
 #
@@ -385,7 +385,7 @@ meminfo_darwin() {
     *)            printf '0\n'             ;;
   esac
 }
-meminfo() { "meminfo_$WS_PLATFORM" "$@"; }
+meminfo() { "meminfo_$DP_PLATFORM" "$@"; }
 
 # Every listening TCP socket as "port<TAB>pid", pid empty when the socket
 # belongs to another user. Five callers used to run ss and re-derive this pair
@@ -409,17 +409,17 @@ listeners_darwin() {
            if (a[k] ~ /^[0-9]+$/) printf "%s\t%s\n", a[k], pid }'
 }
 
-listeners() { "listeners_$WS_PLATFORM" | sort -n -u; }
+listeners() { "listeners_$DP_PLATFORM" | sort -n -u; }
 
 # a process's working directory, or empty when it cannot be read
 proc_cwd_linux()  { readlink "/proc/$1/cwd"; }
 proc_cwd_darwin() { lsof -w -a -d cwd -Fn -p "$1" | sed -n 's/^n//p' | head -1; }
-proc_cwd() { "proc_cwd_$WS_PLATFORM" "$1"; }
+proc_cwd() { "proc_cwd_$DP_PLATFORM" "$1"; }
 
 # the group list, each name in its own colour - doubles as the colour legend
 group_legend() {
   local g out=""
-  for g in $WS_GROUPS; do out+="${GCOL[$g]:-}${g}${C_0} "; done
+  for g in $DP_GROUPS; do out+="${GCOL[$g]:-}${g}${C_0} "; done
   printf '%s' "$out"
 }
 
@@ -499,13 +499,13 @@ hum_kb() { awk "$AWKLIB"' BEGIN { print hum(ARGV[1]) }' "$1"; }
 #   8 cputicks  9 ppid  10 io_bytes
 # Columns 8-10 are counters, not rates: a caller that wants a rate takes two
 # snapshots and divides by the time between them.
-WS_IO=0        # reading /proc/<pid>/io for every process is a third of the
+DP_IO=0        # reading /proc/<pid>/io for every process is a third of the
                # snapshot's cost, so only the callers that show it opt in
-snapshot() { "snapshot_$WS_PLATFORM"; }
+snapshot() { "snapshot_$DP_PLATFORM"; }
 
 snapshot_linux() {
   ps -eo pid=,ppid=,rss=,etimes=,pcpu=,args= --sort=-rss |
-    awk -v wantio="$WS_IO" "$AWKCAT"'
+    awk -v wantio="$DP_IO" "$AWKCAT"'
   function swapkb(pid,   f, line, p, v) {
     f = "/proc/" pid "/status"; v = 0
     while ((getline line < f) > 0)
@@ -573,7 +573,7 @@ snapshot_darwin() {
 SNAP=""
 snap() { if [ -n "$SNAP" ]; then printf '%s\n' "$SNAP"; else snapshot; fi; }
 
-valid_group() { case " $WS_GROUPS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+valid_group() { case " $DP_GROUPS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # ----------------------------------------------------------------- header ----
 header() {
@@ -584,7 +584,7 @@ header() {
   cores=$(cpu_cores)
   dstate=$(dstate_count)
 
-  printf '%s%s %s RESOURCES %s %s%s  up %s%s\n\n' "$C_B" "$C_C" "$WS_LABEL" "$C_0" \
+  printf '%s%s %s RESOURCES %s %s%s  up %s%s\n\n' "$C_B" "$C_C" "$DP_LABEL" "$C_0" \
     "$C_DIM" "$(date '+%a %d %b %H:%M')" "$(uptime_pretty)" "$C_0"
   printf '  %-6s %s   %s used of %s  %s(%s available)%s\n' "RAM" \
     "$(bar $(( mt - ma )) "$mt")" "$(hum_kb $(( mt - ma )))" "$(hum_kb "$mt")" \
@@ -644,7 +644,7 @@ header() {
 
 # ----------------------------------------------------------------- tables ----
 group_table() {
-  snap | awk -F'\t' -v ORDER="$WS_GROUPS" -v CB="$C_B" -v CD="$C_DIM" -v C0="$C_0" \
+  snap | awk -F'\t' -v ORDER="$DP_GROUPS" -v CB="$C_B" -v CD="$C_DIM" -v C0="$C_0" \
   -v GCOLS="$GCOLS_STR" \
   "$AWKLIB"'
   { n[$6]++; r[$6] += $2; s[$6] += $3; tn++; tr += $2; ts += $3 }
@@ -819,7 +819,7 @@ kill_cmd() {
       roots=("$target")
       ;;
     group)
-      valid_group "$target" || die "unknown group '$target' (valid: $WS_GROUPS)"
+      valid_group "$target" || die "unknown group '$target' (valid: $DP_GROUPS)"
       mapfile -t roots < <(snapshot | awk -F'\t' -v g="$target" '$6 == g { print $1 }')
       [ "${#roots[@]}" -gt 0 ] || die "no processes in group '$target'"
       ;;
@@ -973,7 +973,7 @@ idle_cmd() {
   printf '  %sidle: up > 20 min, CPU < 1%% right now, RAM > 20M%s\n' "$C_DIM" "$C_0"
   printf '  %sorphan: its parent is gone, so nobody is watching it any more%s\n' "$C_DIM" "$C_0"
   local rows
-  WS_IO=0
+  DP_IO=0
   rows=$(snapshot_rate 0.3 | awk -F'\t' -v OFS='\t' "$IDLE_AWK" | sort -t$'\t' -k2,2nr)
   if [ -z "${rows//[[:space:]]/}" ]; then
     printf '  %s(nothing obviously idle or orphaned)%s\n\n' "$C_DIM" "$C_0"; return
@@ -1026,7 +1026,7 @@ DASH_SORT=rss
 # snapshot's own order under a "TOP BY SWAP" heading - the same reason the swap
 # command refuses. Derived like DASH_VIEWS so the key and the label agree.
 DASH_SORTS="rss cpu swap io uptime"
-[ "$WS_PLATFORM" = linux ] || DASH_SORTS="rss cpu uptime"
+[ "$DP_PLATFORM" = linux ] || DASH_SORTS="rss cpu uptime"
 DASH_FILTER=""
 DASH_MSG=""
 DASH_HELP=0
@@ -1066,7 +1066,7 @@ uptime_h() {
   fi
 }
 
-read_mem() { "read_mem_$WS_PLATFORM"; [ "$MEM_T" -gt 0 ] || MEM_T=1; }
+read_mem() { "read_mem_$DP_PLATFORM"; [ "$MEM_T" -gt 0 ] || MEM_T=1; }
 
 read_mem_darwin() {
   local t a st sf
@@ -1089,7 +1089,7 @@ read_mem_linux() {
 
 # whole-box CPU from the delta between two /proc/stat reads - the real number,
 # not the lifetime average ps reports
-read_cpu() { "read_cpu_$WS_PLATFORM"; }
+read_cpu() { "read_cpu_$DP_PLATFORM"; }
 
 # Darwin publishes no cumulative CPU counter - there is no kern.cp_time, and
 # iostat would cost a blocking second per tick. The delta of every process's
@@ -1149,7 +1149,7 @@ dash_sample() {
   us=${EPOCHREALTIME/[.,]/}; dt=$(( us - LAST_US )); [ "$LAST_US" -eq 0 ] && dt=0
   LAST_US=$us; SAMPLE_US=$us
 
-  WS_IO=1
+  DP_IO=1
   read_mem; read_cpu
   UPSTR=$(uptime_h)
   read -r L1 L5 L15 <<< "$(loadavg)"
@@ -1354,7 +1354,7 @@ dash_rows_ports() {
 dash_hdr_ports() { printf '%7s %8s %8s %6s  %s' PORT PID RAM "CPU%" PROCESS; }
 
 dash_group_lines() {
-  printf '%s\n' "$SNAP_ROWS" | awk -F'\t' -v ORDER="$WS_GROUPS" \
+  printf '%s\n' "$SNAP_ROWS" | awk -F'\t' -v ORDER="$DP_GROUPS" \
     -v CD="$C_DIM" -v C0="$C_0" -v CG="$C_G" -v CY="$C_Y" -v CR="$C_R" -v GCOLS="$GCOLS_STR" \
     -v BLKS="$(IFS=,; printf '%s' "${BLK[*]}")" -v EMPTY="$BAR_EMPTY" "$AWKLIB"'
     { n[$6]++; r[$6] += $2; s[$6] += $3; c[$6] += $11; io[$6] += $13; tr += $2; tn++ }
@@ -1847,7 +1847,7 @@ PROJECT_MARKERS='.git/HEAD .git package.json composer.json go.mod Cargo.toml pyp
 # with 500 processes the per-pid version costs 500 forks to build a map that is
 # thrown away a moment later. Processes owned by another user are absent from
 # both - Linux gives an unreadable link, Darwin's lsof does not list them.
-cwd_map() { "cwd_map_$WS_PLATFORM"; }
+cwd_map() { "cwd_map_$DP_PLATFORM"; }
 
 cwd_map_darwin() {
   # -d cwd restricts to the working-directory descriptor, -Fpn asks for the
@@ -1993,7 +1993,7 @@ projects_cmd() {
 # Every Windows-side lookup degrades to "unknown" rather than failing, so this
 # still runs on a plain Linux box or with interop turned off.
 
-is_wsl() { [ "$WS_PLATFORM" = linux ] && grep -qi microsoft /proc/version; }
+is_wsl() { [ "$DP_PLATFORM" = linux ] && grep -qi microsoft /proc/version; }
 
 DOC_FINDINGS=()
 finding() { DOC_FINDINGS+=("$1|$2"); }   # crit|warn|ok|tip , text
@@ -2311,7 +2311,7 @@ EOF
 # Sorting by a column that is zero for every row is not a ranking, it is the
 # snapshot's own order wearing a SWAP HOGS heading. Say why instead.
 swap_cmd() {
-  if [ "$WS_PLATFORM" != linux ]; then
+  if [ "$DP_PLATFORM" != linux ]; then
     die "per-process swap is not available on $(uname -s).
        It compresses memory rather than swapping per process, so there is no
        per-pid figure to rank - the SWAP column reads - for the same reason.
@@ -2345,8 +2345,8 @@ case "$cmd" in
   projects|proj)   header; projects_cmd ;;
   doctor|dr)       doctor_cmd ;;
   group|g)
-      [ $# -ge 1 ] || die "usage: $PROG group <${WS_GROUPS// /|}>"
-      valid_group "$1" || die "unknown group '$1' (valid: $WS_GROUPS)"
+      [ $# -ge 1 ] || die "usage: $PROG group <${DP_GROUPS// /|}>"
+      valid_group "$1" || die "unknown group '$1' (valid: $DP_GROUPS)"
       proc_table "$(echo "$1" | tr '[:lower:]' '[:upper:]') PROCESSES" 200 rss "$1" 0 ;;
   ports)           ports_table ;;
   port)            [ $# -ge 1 ] || die "usage: $PROG port <n>"; port_cmd "$1" ;;
