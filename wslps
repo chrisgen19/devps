@@ -195,12 +195,65 @@ function shorten(a, w,   s) {
   s = a
   sub(/^\/[^ ]*\//, "", s)
   gsub(/\/home\/[^\/]+\//, "~/", s)
+  gsub(/\/Users\/[^\/]+\//, "~/", s)
   if (w > 3 && length(s) > w) s = substr(s, 1, w - 3) "..."
   return s
 }
 '
 
 WS_GROUPS="mcp ai-agent dev-server browser editor database webserver node other"
+
+# The group classifier, shared by every snapshot implementation. A process must
+# land in the same group whichever kernel reported it, or the group table means
+# two different things on two machines.
+#
+# Each platform names the same software differently: an editor is a
+# .vscode-server directory under WSL and a Code Helper process bundle on macOS,
+# and Chrome is /opt/google/chrome on one and "Google Chrome.app" on the other.
+# The patterns are additive - both spellings live in the same branch.
+AWKCAT='
+function cat(a,   l) {
+  l = tolower(a)
+  if (l ~ /mcp/)                                                    return "mcp"
+  if (l ~ /(^|\/)claude([ \t]|$)|claude-code|(^|\/)codex([ \t]|$)|cursor-agent/) return "ai-agent"
+  if (l ~ /next-server|next dev|\.next\/|vite|nuxt|astro|webpack|remix|(^|\/)turbo([ \t]|$)/) return "dev-server"
+  if (l ~ /\/chrome|chromium|firefox|msedge|playwright|puppeteer/)   return "browser"
+  if (l ~ /google chrome|safari\.app|webkit\.framework/)             return "browser"
+  if (l ~ /\.vscode-server|\.cursor-server/)                         return "editor"
+  if (l ~ /visual studio code|code helper|cursor helper|zed\.app|sublime text/) return "editor"
+  if (l ~ /mysqld|postgres|redis-server|mariadb|mongod/)             return "database"
+  if (l ~ /apache2|nginx|php-fpm|httpd/)                             return "webserver"
+  if (l ~ /(^|\/)node([ \t]|$)|(^|\/)npm |(^|\/)pnpm |yarn|(^|\/)bun([ \t]|$)/) return "node"
+  return "other"
+}
+'
+
+# --------------------------------------------------------------- platform ----
+# Everything above reads nothing; everything below asks the box a question, and
+# the two kernels answer in different places. Each reader gets one function per
+# platform and a dispatcher, picked once here rather than re-tested per call.
+#
+# snapshot is the contract that matters. Every table, view and dashboard row is
+# built from its ten columns, and none of them know which kernel filled them.
+# A platform that cannot answer a column reports 0 rather than guessing - a
+# wrong swap figure is worse than an absent one.
+case "$(uname -s)" in
+  Linux)  WS_PLATFORM=linux  ;;
+  Darwin) WS_PLATFORM=darwin ;;
+  *)      WS_PLATFORM=linux  ;;   # best effort - assume a /proc filesystem
+esac
+
+# Does this pid still exist. Linux keeps the cheap read: /proc/<pid>/stat is
+# world readable, so it answers "exists", not "is mine". ps is the portable
+# equivalent with those same semantics - kill -0 is not, it fails with EPERM
+# on a live process owned by another user, which would read here as death.
+pid_alive() {
+  if [ "$WS_PLATFORM" = linux ]; then
+    [ -r "/proc/$1/stat" ]
+  else
+    ps -o pid= -p "$1" >/dev/null
+  fi
+}
 
 # the group list, each name in its own colour - doubles as the colour legend
 group_legend() {
@@ -289,8 +342,11 @@ hum_kb() { awk "$AWKLIB"' BEGIN { print hum(ARGV[1]) }' "$1"; }
 # snapshots and divides by the time between them.
 WS_IO=0        # reading /proc/<pid>/io for every process is a third of the
                # snapshot's cost, so only the callers that show it opt in
-snapshot() {
-  ps -eo pid=,ppid=,rss=,etimes=,pcpu=,args= --sort=-rss | awk -v wantio="$WS_IO" '
+snapshot() { "snapshot_$WS_PLATFORM"; }
+
+snapshot_linux() {
+  ps -eo pid=,ppid=,rss=,etimes=,pcpu=,args= --sort=-rss |
+    awk -v wantio="$WS_IO" "$AWKCAT"'
   function swapkb(pid,   f, line, p, v) {
     f = "/proc/" pid "/status"; v = 0
     while ((getline line < f) > 0)
@@ -320,18 +376,6 @@ snapshot() {
     close(f)
     return 0
   }
-  function cat(a,   l) {
-    l = tolower(a)
-    if (l ~ /mcp/)                                                    return "mcp"
-    if (l ~ /(^|\/)claude([ \t]|$)|claude-code|(^|\/)codex([ \t]|$)|cursor-agent/) return "ai-agent"
-    if (l ~ /next-server|next dev|\.next\/|vite|nuxt|astro|webpack|remix|(^|\/)turbo([ \t]|$)/) return "dev-server"
-    if (l ~ /\/chrome|chromium|firefox|msedge|playwright|puppeteer/)   return "browser"
-    if (l ~ /\.vscode-server|\.cursor-server/)                         return "editor"
-    if (l ~ /mysqld|postgres|redis-server|mariadb|mongod/)             return "database"
-    if (l ~ /apache2|nginx|php-fpm|httpd/)                             return "webserver"
-    if (l ~ /(^|\/)node([ \t]|$)|(^|\/)npm |(^|\/)pnpm |yarn|(^|\/)bun([ \t]|$)/) return "node"
-    return "other"
-  }
   {
     pid = $1; ppid = $2; rss = $3 + 0; et = $4 + 0; pc = $5 + 0
     args = ""
@@ -339,6 +383,39 @@ snapshot() {
     if (args ~ /^\[/) next
     printf "%s\t%d\t%d\t%d\t%s\t%s\t%s\t%d\t%s\t%d\n", pid, rss, swapkb(pid), et, pc,
            cat(args), args, ticks(pid), ppid, iobytes(pid)
+  }'
+}
+
+# Darwin has no /proc, so everything the Linux snapshot reads per pid has to
+# come out of ps itself:
+#   -m    sort by memory descending, the BSD spelling of --sort=-rss
+#   -ww   never truncate args to the terminal width
+#   time  cumulative CPU as [[DD-]HH:]MM:SS.ss - hundredths, so a two second
+#         dashboard tick still sees movement
+# etime and time arrive as clock strings rather than numbers, so both are
+# parsed back here; every consumer downstream expects seconds and ticks.
+#
+# Columns 3 (swap) and 10 (io) are 0 and cannot be otherwise. Darwin compresses
+# memory instead of swapping per process, and exposes no readable per-process
+# block IO counter. Both are reported absent, not estimated.
+snapshot_darwin() {
+  ps -ww -eo pid=,ppid=,rss=,etime=,pcpu=,time=,args= -m | awk "$AWKCAT"'
+  function secs(t,   d, p, n, v, i) {
+    d = 0
+    if (t ~ /-/) { split(t, p, "-"); d = p[1] + 0; t = p[2] }
+    n = split(t, p, ":")
+    v = 0
+    for (i = 1; i <= n; i++) v = v * 60 + (p[i] + 0)
+    return v + d * 86400
+  }
+  {
+    pid = $1; ppid = $2; rss = $3 + 0; et = secs($4); pc = $5 + 0
+    tk = secs($6) * 100          # CLK_TCK is 100 on Darwin as it is on Linux
+    args = ""
+    for (i = 7; i <= NF; i++) args = args (i > 7 ? " " : "") $i
+    if (args == "" || args ~ /^\[/) next
+    printf "%s\t%d\t%d\t%d\t%s\t%s\t%s\t%d\t%s\t%d\n", pid, rss, 0, et, pc,
+           cat(args), args, tk, ppid, 0
   }'
 }
 
@@ -486,7 +563,7 @@ ports_table() {
     rss=""; args=""
     if [ -z "$pid" ]; then
       args="${C_DIM}(another user - run: sudo wslps ports)${C_0}"
-    elif [ -r "/proc/$pid/stat" ]; then
+    elif pid_alive "$pid"; then
       rss=$(ps -o rss= -p "$pid" | tr -d ' ')
       args=$(ps -o args= -p "$pid" | cut -c1-58)
     else
@@ -544,10 +621,10 @@ climb() {
 
 tree_cmd() {
   local pid="$1" p
-  [ -r "/proc/$pid/stat" ] || die "no such process: $pid"
+  pid_alive "$pid" || die "no such process: $pid"
   printf '%sPROCESS TREE from %s%s\n' "$C_B" "$pid" "$C_0"
   { echo "$pid"; descendants "$pid"; } | sort -un | while read -r p; do
-      if [ -r "/proc/$p/stat" ]; then ps -o pid=,rss=,args= -p "$p"; fi
+      if pid_alive "$p"; then ps -o pid=,rss=,args= -p "$p"; fi
     done | sort -k2,2nr | awk "$AWKLIB"'
       BEGIN { printf "  %7s %8s  %s\n", "PID", "RAM", "COMMAND" }
       { a = ""; for (i = 3; i <= NF; i++) a = a (i > 3 ? " " : "") $i
@@ -594,7 +671,7 @@ kill_cmd() {
       ;;
     pid)
       case "$target" in *[!0-9]*) die "pid must be a number" ;; esac
-      [ -r "/proc/$target/stat" ] || die "no such process: $target"
+      pid_alive "$target" || die "no such process: $target"
       [ "$target" -le 1 ] && die "refusing to kill pid $target (init) - that would take down WSL"
       is_protected "$target" && die "pid $target is your own shell or session - refusing"
       roots=("$target")
@@ -628,7 +705,7 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
   fi
 
   for p in $(printf '%s\n' "${all[@]}" | sort -un); do
-    [ -r "/proc/$p/stat" ] || continue
+    pid_alive "$p" || continue
     if is_protected "$p"; then skipped+=("$p"); else pids+=("$p"); fi
   done
 
@@ -641,7 +718,7 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
 
   printf '%sWILL STOP%s  %s(SIG%s)%s\n' "$C_B" "$C_0" "$C_DIM" "$sig" "$C_0"
   for p in "${pids[@]}"; do
-    if [ -r "/proc/$p/stat" ]; then ps -o pid=,rss=,etimes=,args= -p "$p"; fi
+    if pid_alive "$p"; then ps -o pid=,rss=,etimes=,args= -p "$p"; fi
   done | awk "$AWKLIB"'
     BEGIN { printf "  %7s %8s %8s  %s\n", "PID", "RAM", "UPTIME", "COMMAND" }
     { a = ""; for (i = 4; i <= NF; i++) a = a (i > 4 ? " " : "") $i
@@ -681,14 +758,14 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
   fi
 
   for p in "${pids[@]}"; do
-    if [ -r "/proc/$p/stat" ]; then kill "-$sig" "$p" || true; fi
+    if pid_alive "$p"; then kill "-$sig" "$p" || true; fi
   done
 
   local i=0 alive=0
   while [ "$i" -lt 20 ]; do
     alive=0
     for p in "${pids[@]}"; do
-      if [ -r "/proc/$p/stat" ]; then alive=$(( alive + 1 )); fi
+      if pid_alive "$p"; then alive=$(( alive + 1 )); fi
     done
     [ "$alive" -eq 0 ] && break
     sleep 0.25; i=$(( i + 1 ))
