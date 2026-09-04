@@ -202,6 +202,12 @@ expect_short 'Visual Studio Code renderer' \
   '/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Renderer).app/Contents/MacOS/Code Helper (Renderer) --type=renderer'
 # no .app bundle on Linux, so the executable name stands in
 expect_short 'chrome renderer' '/opt/google/chrome/chrome --type=renderer --lang=en-US'
+# the crash reporter is a helper with no --type= at all: it spells the same
+# thing as ptype= inside another flag
+expect_short 'Google Chrome crashpad' \
+  "$chrome/chrome_crashpad_handler --monitor-self-annotation=ptype=crashpad-handler --database=/tmp/Crashpad"
+expect_short 'chrome_crashpad_handler crashpad' \
+  '/opt/google/chrome/chrome_crashpad_handler --monitor-self-annotation=ptype=crashpad-handler'
 # and --type= belongs to plenty of things that are not helpers
 expect_short 'mount --type=ext4 /dev/sda1 /mnt' '/bin/mount --type=ext4 /dev/sda1 /mnt'
 expect_short 'node server.js --port 3000'       '/usr/bin/node server.js --port 3000'
@@ -211,6 +217,22 @@ expect_short 'node script.js --type=service' '/usr/bin/node script.js --type=ser
 # and --type= has to be a whole argument, not a substring of one
 expect_short 'mytool --expected=--type=renderer run' \
              '/usr/bin/mytool --expected=--type=renderer run'
+# every test is against the program, never its arguments. A renderer carries
+# --crashpad-handler-pid on Linux, and reading that as identity would collapse
+# every renderer, gpu and utility row to the same wrong label.
+expect_short 'chrome renderer' \
+  '/opt/google/chrome/chrome --type=renderer --crashpad-handler-pid=123 --lang=en-US'
+expect_short 'tool --type=crashpad-handler' '/usr/bin/tool --type=crashpad-handler'
+expect_short 'mytool --helper=/usr/lib/crashpad_handler run' \
+             '/usr/bin/mytool --helper=/usr/lib/crashpad_handler run'
+expect_short 'node --config=helper.json --type=renderer app.js' \
+             '/usr/bin/node --config=helper.json --type=renderer app.js'
+# the same rule applies to the name, not just the tests: an argument naming a
+# path inside some other bundle must not become the application
+expect_short 'chrome_crashpad_handler crashpad' \
+  '/opt/google/chrome/chrome_crashpad_handler --database=/tmp/Other.app/db'
+expect_short 'chrome renderer' \
+  '/opt/google/chrome/chrome --type=renderer --user-data-dir=/tmp/Other.app/profile'
 
 group "group classification"
 # drive the real classifier out of the script rather than a copy of it, so this

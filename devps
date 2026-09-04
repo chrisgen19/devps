@@ -241,7 +241,51 @@ function redact(s,   n, a, i, j, t, k, p, rest, slash, at, ui, c, out) {
 #
 # Returns "" when this is not a helper, which is every process that has no
 # --type= at all.
-function helper(s,   app, t, u, head) {
+# the outermost .app is the application; the nested bundle belongs to the
+# helper itself. Without one - Linux, where chrome is just a path - fall back
+# to the basename of the executable.
+# The application a bundled executable belongs to. Takes a path with the
+# arguments already removed - given a whole command line the .app search would
+# read one out of an argument, and "--database=/tmp/Other.app/db" would name
+# the process Other.
+#
+# The first .app is the outermost, which is the application; the helper has its
+# own bundle nested inside it. Without one - Linux, where chrome is just a path
+# - the basename stands in.
+function appname(e,   app) {
+  app = e
+  if (match(app, /\/[^\/]+\.app\//)) return substr(app, RSTART + 1, RLENGTH - 6)
+  sub(/^.*\//, "", app)
+  return app
+}
+# The program being run, with its arguments dropped. Everything here is about
+# what a process IS, and an argument can say anything: a renderer carries
+# --crashpad-handler-pid, an ordinary tool can be passed --config=helper.json,
+# and any of them can name a path inside some unrelated .app bundle. Reading
+# the whole line lets an argument decide both the tests and the name.
+#
+# macOS bundle paths contain spaces, so the first whitespace is not the
+# boundary - the first flag is.
+function exepath(s,   e) {
+  e = s
+  sub(/ -.*/, "", e)
+  return e
+}
+# The invariant, which four separate bugs have now come from breaking: what a
+# process IS comes from path/prog, never from s. Read s only for fields that
+# are genuinely arguments - --type= and --utility-sub-type= - and only after
+# the program itself has been recognised.
+function helper(s,   app, t, u, path, prog) {
+  path = exepath(s)
+  prog = tolower(path)
+  # The crash reporter is a helper too, but it takes no --type= - it spells the
+  # same thing as ptype= inside --monitor-self-annotation, which is not worth
+  # parsing. Name it from the binary instead: crashpad_handler is a Chromium
+  # and Electron binary, so the name is the identification.
+  if (prog ~ /crashpad[_-]?handler$/) {
+    app = appname(path)
+    return (app == "") ? "" : app " crashpad"
+  }
   # --type= has to be a whole argument. Without the boundary,
   # "--expected=--type=renderer" matches, and a greedy search would take the
   # last spelling in the line rather than the first real one.
@@ -254,16 +298,10 @@ function helper(s,   app, t, u, head) {
   # that takes a --type flag gets rewritten: "node script.js --type=service"
   # is not a renderer. Bundled helpers are always named Helper something; on
   # Linux the renderer is the browser binary re-execing itself.
-  head = tolower(s); sub(/ --type=.*/, "", head)
-  if (head !~ /helper/ &&
-      head !~ /(^|\/)(chrome|chromium|chromium-browser|electron|msedge|brave|brave-browser|opera|vivaldi)( |$)/) return ""
+  if (prog !~ /helper/ &&
+      prog !~ /(^|\/)(chrome|chromium|chromium-browser|electron|msedge|brave|brave-browser|opera|vivaldi)$/) return ""
   sub(/-process$/, "", t)                    # gpu-process reads better as gpu
-  # the outermost .app is the application; the nested bundle belongs to the
-  # helper itself. Without one - Linux, where chrome is just a path - fall back
-  # to the basename of the executable.
-  app = s
-  if (match(app, /\/[^\/]+\.app\//)) app = substr(app, RSTART + 1, RLENGTH - 6)
-  else { sub(/[ \t].*/, "", app); sub(/^.*\//, "", app) }
+  app = appname(path)
   if (app == "") return ""
   # network.mojom.NetworkService is the useful half of a utility process
   if (t == "utility" && match(s, /--utility-sub-type=[A-Za-z0-9._]+/)) {
