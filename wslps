@@ -635,6 +635,17 @@ tree_cmd() {
 
 # ------------------------------------------------------------------- kill ----
 kill_cmd() {
+  # Stopping things is still Linux only. The preview below asks ps for etimes
+  # and reads /proc/<pid>/status for the freed-memory figure, and neither
+  # exists on Darwin: BSD ps drops the unknown column and shifts args left, so
+  # the confirmation would name the wrong command, show 0m uptime and claim a
+  # real kill frees 0K. Until that preview is portable this refuses, which is
+  # what the /proc readability test used to do here by accident.
+  if [ "$WS_PLATFORM" != linux ]; then
+    die "kill is not ported to $(uname -s) yet - its preview cannot be trusted here.
+       find the process with 'wslps top' and stop it with kill(1) directly."
+  fi
+
   local kind="" target="" assume_yes=0 sig=TERM dry=0 a r p
   local -a roots=() pids=() skipped=() all=() climbed=()
 
