@@ -62,6 +62,53 @@ The `SWAP` column is the point. A dev server you have not touched in five hours 
 
 ## Platforms
 
+The same report on macOS. Rows elided for length; nothing else is changed:
+
+```
+ MACOS RESOURCES  Fri 04 Sep 21:40  up 3 hours, 42 minutes
+
+  RAM    ####################....  82%   13.2G used of 16.0G  (2.8G available)
+  SWAP   ######..................  22%   224M used of 1.0G  (800M free)
+  LOAD   #####...................  18%   2.10 / 2.05 / 2.01  across 12 cores
+
+  all clear
+
+LISTENING PORTS
+     PORT      PID      RAM  PROCESS
+       80      800     464K  nginx: worker process
+      443      800     464K  nginx: worker process
+     3306     1362     7.2M  /opt/homebrew/opt/mysql@8.0/bin/mysqld --basedir=/opt/home
+     5000      674    71.9M  /System/Library/CoreServices/ControlCenter.app/Contents/Ma
+     5432     1145     7.2M  /opt/homebrew/opt/postgresql@17/bin/postgres -D /opt/homeb
+     8025     1136    10.6M  /opt/homebrew/opt/mailpit/bin/mailpit
+     9000     1137     5.9M  php-fpm: master process (/opt/homebrew/etc/php/8.2/php-fpm
+
+GROUPS
+  GROUP         COUNT       RAM      SWAP
+  other           484      5.9G         -   ############
+  browser          60      5.8G         -   ############
+  ai-agent          7      847M         -   ##
+  mcp               7     44.0M         -
+  webserver        24     27.8M         -
+  database          8     24.3M         -
+  TOTAL           590     12.6G         -
+
+TOP PROCESSES
+      PID      RAM     SWAP  GROUP         UPTIME  COMMAND
+    19525     475M        -  ai-agent       2h12m  claude
+      652     353M        -  browser        3h41m  Google Chrome.app/Contents/MacOS/Google Chrome
+    49308     233M        -  other             1m  VLC
+     3404     223M        -  ai-agent       3h11m  claude
+     1366     141M        -  browser        3h40m  com.apple.WebKit.WebContent
+```
+
+Two things that example shows about the port. The `SWAP` column is `-` throughout,
+because Darwin has no per-process swap to report - it says so rather than printing
+a zero that would read as "this process is not swapping". And port 5000 is macOS's
+own AirPlay receiver, which is worth knowing before you spend an afternoon on why
+your dev server will not bind.
+
+
 | | Linux / WSL2 | macOS |
 | --- | --- | --- |
 | Processes, groups, RAM, uptime, load | yes | yes |
