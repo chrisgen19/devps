@@ -196,8 +196,44 @@ function gcol(g) {
   }
   return (g in GC) ? GC[g] : ""
 }
+# Mask secrets in a command line when DEVPS_REDACT is set. Read from the
+# environment rather than passed in, so the nine call sites do not each need
+# their own -v. Two shapes cover what actually leaks into a process list: a URL
+# userinfo, and a KEY=VALUE whose key names a secret. The username survives -
+# it is the half that tells you which service this is.
+#
+# Splitting on single spaces collapses runs of them. Command lines rarely carry
+# those, and a redacted line is being read, not re-executed.
+function redact(s,   n, a, i, j, t, k, p, rest, slash, at, ui, c, out) {
+  if (ENVIRON["DEVPS_REDACT"] == "") return s
+  n = split(s, a, " ")
+  out = ""
+  for (i = 1; i <= n; i++) {
+    t = a[i]
+    # [^:/]* not + : redis://:password@host omits the username entirely
+    if (t ~ /:\/\/[^:\/]*:[^\/]+@/) {
+      p = index(t, "://"); rest = substr(t, p + 3)
+      # the userinfo ends at the LAST @ before the path, not the first: a
+      # password may contain @, and taking the first one leaks its tail
+      slash = index(rest, "/"); if (slash == 0) slash = length(rest) + 1
+      at = 0
+      for (j = 1; j < slash; j++) if (substr(rest, j, 1) == "@") at = j
+      if (at > 0) {
+        ui = substr(rest, 1, at - 1); c = index(ui, ":")
+        if (c > 0)
+          t = substr(t, 1, p + 2) substr(ui, 1, c) "***" substr(rest, at)
+      }
+    }
+    if (match(t, /=/)) {
+      k = substr(t, 1, RSTART - 1)
+      if (tolower(k) ~ /pass|pwd|token|secret|credential|api[-_]?key/) t = k "=***"
+    }
+    out = out (i > 1 ? " " : "") t
+  }
+  return out
+}
 function shorten(a, w,   s) {
-  s = a
+  s = redact(a)
   sub(/^\/[^ ]*\//, "", s)
   gsub(/\/home\/[^\/]+\//, "~/", s)
   gsub(/\/Users\/[^\/]+\//, "~/", s)
@@ -494,6 +530,10 @@ bar() {
 
 hum_kb() { awk "$AWKLIB"' BEGIN { print hum(ARGV[1]) }' "$1"; }
 
+# shorten() redacts on the way past, which covers every table built from a
+# snapshot. These three read ps straight into a printf, so they filter here.
+redact_line() { awk "$AWKLIB"'{ print redact($0) }'; }
+
 # snapshot -> TSV, rss desc:
 #   1 pid  2 rss_kb  3 swap_kb  4 etimes  5 pcpu  6 group  7 args
 #   8 cputicks  9 ppid  10 io_bytes
@@ -709,7 +749,7 @@ ports_table() {
       args="${C_DIM}(another user - run: sudo $PROG ports)${C_0}"
     elif pid_alive "$pid"; then
       rss=$(ps -o rss= -p "$pid" | tr -d ' ')
-      args=$(ps -o args= -p "$pid" | cut -c1-58)
+      args=$(ps -o args= -p "$pid" | redact_line | cut -c1-58)
     else
       args="${C_DIM}(exited)${C_0}"
     fi
@@ -736,7 +776,7 @@ ancestors() {
 # a bare interactive shell / session leader - never climb past one of these
 is_boundary() {
   local a
-  a=$(ps -o args= -p "$1" | sed 's/^ *//' || true)
+  a=$(ps -o args= -p "$1" | redact_line | sed 's/^ *//' || true)
   [ -z "$a" ] && return 0
   case "$a" in
     -bash|-zsh|-sh|bash|zsh|sh|fish|login|init|/sbin/init) return 0 ;;
@@ -999,7 +1039,7 @@ port_cmd() {
   root=$(climb "$pid")
   printf '%sPORT %s%s\n' "$C_B" "$port" "$C_0"
   printf '  listener pid : %s\n' "$pid"
-  printf '  command      : %s\n' "$(ps -o args= -p "$pid" | cut -c1-70)"
+  printf '  command      : %s\n' "$(ps -o args= -p "$pid" | redact_line | cut -c1-70)"
   printf '  started      : %s\n' "$(ps -o lstart= -p "$pid" | sed 's/^ *//')"
   printf '  project dir  : %s\n' "$(proc_cwd "$pid" || echo '?')"
   printf '  server root  : %s  %s<- what "%s kill port %s" targets%s\n' \
@@ -2290,6 +2330,12 @@ ${C_B}DASHBOARD${C_0} ${C_DIM}($PROG dash)${C_0}
   terminal, when NO_COLOR is set, or when the locale is not UTF-8.
   DEVPS_ASCII=1 keeps the colour and draws with # and . instead.
 
+${C_B}REDACTING${C_0}
+  ${C_C}--redact${C_0}  mask secrets in the command lines shown - URL passwords and
+            any KEY=VALUE whose key names a password, token, secret or
+            api key. DEVPS_REDACT=1 does the same. Worth it before
+            pasting output into an issue or a screenshot.
+
 ${C_B}GROUPS${C_0}
   $(group_legend)
   ${C_DIM}each group keeps its colour in every table${C_0}
@@ -2332,6 +2378,18 @@ report() {
 }
 
 # ------------------------------------------------------------------- main ----
+# Global flags are stripped here so no subcommand parser has to know about
+# them. --redact is exported rather than passed: the awk that does the masking
+# reads it from the environment.
+_argv=()
+for _a in "$@"; do
+  case "$_a" in
+    --redact) export DEVPS_REDACT=1 ;;
+    *)        _argv+=("$_a") ;;
+  esac
+done
+set -- ${_argv[@]+"${_argv[@]}"}
+
 cmd="${1:-report}"
 if [ $# -gt 0 ]; then shift; fi
 

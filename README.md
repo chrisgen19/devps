@@ -71,6 +71,7 @@ The `SWAP` column is the point. A dev server you have not touched in five hours 
 | Per-process **disk IO** | yes | no - no readable per-process counter |
 | `STALL` / PSI pressure | yes, on a kernel that has it | no - falls back to load average |
 | `projects` | yes | yes |
+| `--redact` | yes | yes |
 | `doctor` | WSL2 only | not applicable |
 
 Where a number cannot be read honestly it is reported as absent rather than
@@ -227,6 +228,26 @@ What it shows that the one-shot report cannot:
 `x` and `t` drop out of the dashboard and run the ordinary `devps kill` and
 `devps tree`, so the preview, the confirmation and every guard below still
 apply. The dashboard itself never signals anything.
+
+### `--redact` before you paste output anywhere
+
+Command lines are shown in full, and yours may carry credentials - a
+`postgres://user:password@host` connection string in an MCP server's arguments,
+a `PGPASSWORD=` in a daemon's environment. `--redact` masks them:
+
+```
+$ devps ports
+     5432    91234    7.2M  npm exec @modelcontextprotocol/server-postgres postgres://app:changeme@localhost:5432/shop
+
+$ devps ports --redact
+     5432    91234    7.2M  npm exec @modelcontextprotocol/server-postgres postgres://app:***@localhost:5432/shop
+```
+
+It masks URL passwords and any `KEY=VALUE` whose key names a password, token,
+secret or api key, and it leaves the username visible because that is the half
+that tells you which service you are looking at. `DEVPS_REDACT=1` does the same
+thing. It is off by default: the full command line is usually what you want on
+your own machine, and the flag is for when the output is going somewhere else.
 
 Colour and block glyphs turn themselves off when the output is not a terminal,
 when `NO_COLOR` is set, or when the locale is not UTF-8. `DEVPS_ASCII=1` keeps
