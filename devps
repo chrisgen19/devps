@@ -268,7 +268,7 @@ function secs(t,   d, p, n, v, i) {
 '
 
 AWKCAT='
-function cat(a,   l) {
+function cat(a,   l, exe) {
   l = tolower(a)
   # the official packages spell it out: "@modelcontextprotocol/server-postgres"
   # contains no "mcp", so it used to fall through to the postgres branch and be
@@ -290,9 +290,14 @@ function cat(a,   l) {
   # webserver and /usr/sbin/mysqld is still a database, because those branches
   # ran first. Matching on install prefix rather than name: the set of daemon
   # names is unbounded, the directories they live in are not.
-  if (l ~ /^\/system\/|^\/library\/apple\/|com\.apple\./)                   return "system"
-  if (l ~ /^\/usr\/libexec\/|^\/usr\/sbin\/|^\/usr\/lib\/|^\/sbin\/|^\/lib\//) return "system"
-  if (l ~ /(^|\/)(systemd|launchd|dbus-daemon|rsyslogd|udevd|agetty|sshd|cron)([ \t]|$)/) return "system"
+  # Only the executable decides this, never an argument: "/opt/tool --name
+  # com.apple.fake" is not a system process, and "/home/alice/cron" is not cron.
+  exe = l; sub(/[ \t].*/, "", exe)
+  if (exe ~ /^\/system\/|^\/library\/apple\/|^\/usr\/libexec\/|^\/usr\/sbin\/|^\/usr\/lib\/|^\/sbin\/|^\/lib\//) return "system"
+  if (exe ~ /^com\.apple\./) return "system"
+  # a bare daemon name, with no path at all - a path-qualified one had to match
+  # a system prefix above to count
+  if (exe !~ /\// && exe ~ /^(systemd|systemd-[a-z]+|launchd|dbus-daemon|rsyslogd|udevd|agetty|sshd|cron)$/) return "system"
   return "other"
 }
 '
@@ -625,6 +630,14 @@ snap() { if [ -n "$SNAP" ]; then printf '%s\n' "$SNAP"; else snapshot; fi; }
 
 valid_group() { case " $DP_GROUPS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
+# Groups that may be read but never signalled in bulk. build_protected shields
+# pid 1 and the caller's own ancestors and nothing else, so "kill group system"
+# would SIGTERM every daemon the OS is running - several hundred of them on a
+# Mac - and take the session with it. Reading them is useful; stopping them as
+# a set never is.
+DP_UNKILLABLE="system"
+killable_group() { case " $DP_UNKILLABLE " in *" $1 "*) return 1 ;; *) return 0 ;; esac; }
+
 # ----------------------------------------------------------------- header ----
 header() {
   local mt ma st sf su l1 l5 l15 cores dstate warned=0
@@ -870,6 +883,10 @@ kill_cmd() {
       ;;
     group)
       valid_group "$target" || die "unknown group '$target' (valid: $DP_GROUPS)"
+      killable_group "$target" || die "refusing to stop the '$target' group.
+       Those are the operating system's own processes, not yours, and nothing
+       here is safe to signal as a set. If you really mean one of them, name it:
+       $PROG kill pid <n>"
       mapfile -t roots < <(snapshot | awk -F'\t' -v g="$target" '$6 == g { print $1 }')
       [ "${#roots[@]}" -gt 0 ] || die "no processes in group '$target'"
       ;;

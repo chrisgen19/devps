@@ -217,6 +217,12 @@ expect_group database   '/usr/lib/postgresql/17/bin/postgres -D /var/lib/postgre
 expect_group browser    '/usr/lib/firefox/firefox'
 # and other keeps its real meaning: something you installed and started
 expect_group other      '/Applications/VLC.app/Contents/MacOS/VLC'
+# only the executable decides the group - an argument must not be able to
+# promote a user process into system
+expect_group other      '/opt/tool --name com.apple.fake'
+expect_group other      '/home/alice/cron --user'
+expect_group other      '/usr/local/bin/sshd-wrapper'
+expect_group other      '/home/bob/launchd'
 
 group "idle classification"
 # ppid 1 plus a hand-started group is an orphan; system daemons at ppid 1 are
@@ -317,6 +323,11 @@ esac
 group "bad input is rejected"
 rejects "unknown command"   "$DEVPS" bogus
 rejects "unknown group"     "$DEVPS" group nope
+# system is readable but never killable as a set: build_protected shields pid 1
+# and this session, nothing else, so bulk-signalling it would take the machine.
+# -d so a regression here fails the test rather than the runner.
+rejects "kill group system is refused" "$DEVPS" kill group system -d
+ok      "but the system group still reads" "$DEVPS" group system
 rejects "kill with no args" "$DEVPS" kill
 rejects "non-numeric pid"   "$DEVPS" kill pid abc
 rejects "unused port"       "$DEVPS" port 65999
