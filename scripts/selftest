@@ -46,7 +46,7 @@ group "dependencies"
 for t in ps pgrep awk; do
   if command -v "$t" > /dev/null; then pass "$t present"; else fail "$t missing"; fi
 done
-if [ "$PLAT" = Linux ]; then deps="ss"; else deps="sysctl vm_stat"; fi
+if [ "$PLAT" = Linux ]; then deps="ss"; else deps="sysctl vm_stat lsof"; fi
 for t in $deps; do
   if command -v "$t" > /dev/null; then pass "$t present"; else fail "$t missing"; fi
 done
@@ -58,7 +58,7 @@ ok "report"       "$WSLPS"
 ok "top"          "$WSLPS" top 5
 ok "swap"         "$WSLPS" swap 5
 ok "idle"         "$WSLPS" idle
-linux_only "ports"   "$WSLPS" ports
+ok "ports"        "$WSLPS" ports
 ok "group node"   "$WSLPS" group node
 ok "tree self"    "$WSLPS" tree $$
 
@@ -187,8 +187,7 @@ rejects "unknown command"   "$WSLPS" bogus
 rejects "unknown group"     "$WSLPS" group nope
 rejects "kill with no args" "$WSLPS" kill
 rejects "non-numeric pid"   "$WSLPS" kill pid abc
-if [ "$PLAT" = Linux ]; then rejects "unused port" "$WSLPS" port 65999
-else skip "unused port (Linux only)"; fi
+rejects "unused port"       "$WSLPS" port 65999
 rejects "non-numeric dash interval" "$WSLPS" dash xyz
 if [ "$PLAT" = Linux ]; then rejects "unknown project" "$WSLPS" kill project __no_such_project__ -y
 else skip "unknown project (Linux only)"; fi
