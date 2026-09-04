@@ -217,6 +217,16 @@ expect_short 'node script.js --type=service' '/usr/bin/node script.js --type=ser
 # and --type= has to be a whole argument, not a substring of one
 expect_short 'mytool --expected=--type=renderer run' \
              '/usr/bin/mytool --expected=--type=renderer run'
+# every test is against the program, never its arguments. A renderer carries
+# --crashpad-handler-pid on Linux, and reading that as identity would collapse
+# every renderer, gpu and utility row to the same wrong label.
+expect_short 'chrome renderer' \
+  '/opt/google/chrome/chrome --type=renderer --crashpad-handler-pid=123 --lang=en-US'
+expect_short 'tool --type=crashpad-handler' '/usr/bin/tool --type=crashpad-handler'
+expect_short 'mytool --helper=/usr/lib/crashpad_handler run' \
+             '/usr/bin/mytool --helper=/usr/lib/crashpad_handler run'
+expect_short 'node --config=helper.json --type=renderer app.js' \
+             '/usr/bin/node --config=helper.json --type=renderer app.js'
 
 group "group classification"
 # drive the real classifier out of the script rather than a copy of it, so this

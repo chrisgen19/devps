@@ -250,12 +250,26 @@ function appname(s,   app) {
   sub(/[ \t].*/, "", app); sub(/^.*\//, "", app)
   return app
 }
-function helper(s,   app, t, u, head) {
+# The program being run, lowercased, with its arguments dropped. Every check
+# below is about what the process IS, and an argument can say anything: a
+# renderer carries --crashpad-handler-pid, and a perfectly ordinary tool can be
+# passed --config=helper.json. Deciding from the whole line reads those as
+# identity.
+#
+# macOS bundle paths contain spaces, so the first whitespace is not the
+# boundary - the first flag is.
+function exe(s,   e) {
+  e = s
+  sub(/ -.*/, "", e)
+  return tolower(e)
+}
+function helper(s,   app, t, u, prog) {
+  prog = exe(s)
   # The crash reporter is a helper too, but it takes no --type= - it spells the
   # same thing as ptype= inside --monitor-self-annotation, which is not worth
-  # parsing. Name it from the binary instead. crashpad is Chromium and Electron
-  # specific, so the name alone is enough to recognise it.
-  if (s ~ /crashpad[_-]?handler/) {
+  # parsing. Name it from the binary instead: crashpad_handler is a Chromium
+  # and Electron binary, so the name is the identification.
+  if (prog ~ /crashpad[_-]?handler$/) {
     app = appname(s)
     return (app == "") ? "" : app " crashpad"
   }
@@ -271,9 +285,8 @@ function helper(s,   app, t, u, head) {
   # that takes a --type flag gets rewritten: "node script.js --type=service"
   # is not a renderer. Bundled helpers are always named Helper something; on
   # Linux the renderer is the browser binary re-execing itself.
-  head = tolower(s); sub(/ --type=.*/, "", head)
-  if (head !~ /helper/ &&
-      head !~ /(^|\/)(chrome|chromium|chromium-browser|electron|msedge|brave|brave-browser|opera|vivaldi)( |$)/) return ""
+  if (prog !~ /helper/ &&
+      prog !~ /(^|\/)(chrome|chromium|chromium-browser|electron|msedge|brave|brave-browser|opera|vivaldi)$/) return ""
   sub(/-process$/, "", t)                    # gpu-process reads better as gpu
   app = appname(s)
   if (app == "") return ""
