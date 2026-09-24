@@ -841,54 +841,84 @@ docker_port_labels() {
       }'
 }
 
-# The names of a set of containers and the commands that stop them: the names
-# comma separated on the first line, then one line per distinct command. A
-# DDEV project's web and db containers stop with the one ddev stop, so it is
-# given once, not once per container.
-docker_stops() {  # <comma separated ids>
-  local id name kind proj names="" hint
-  local -A seen=()
-  local -a hints=()
+# The commands that stop a set of containers, one per line. A DDEV project
+# stops with ddev stop when the ddev CLI is here, once for all its
+# containers: it also tidies what DDEV set up around them. Everything else,
+# and every container under -9, goes to docker stop or docker kill by name.
+# DEVPS_DDEV names the ddev CLI, so a test can stand one in rather than stop
+# a real site.
+container_stop_plan() {  # <comma separated ids> <TERM|KILL>
+  local id name kind proj site verb=stop have_ddev=0
+  local -A sites=()
+  local -a names=() order=()
+  [ "$2" = KILL ] && verb='kill'
+  command -v "${DEVPS_DDEV:-ddev}" > /dev/null && have_ddev=1
   for id in ${1//,/ }; do
+    name=""
     IFS=$'\t' read -r _ name _ kind proj _ < <(docker_snap | awk -F'\t' -v id="$id" '$1 == id')
-    names+="${names:+, }$name"
-    hint=$(docker_stop_hint "$kind" "$proj" "$name")
-    if [ -z "${seen[$hint]:-}" ]; then seen[$hint]=1; hints+=("$hint"); fi
+    [ -n "$name" ] || continue
+    if [ "$verb" = stop ] && [ "$kind" = ddev ] && [ "$have_ddev" = 1 ]; then
+      if [ -z "${sites[$proj]:-}" ]; then sites[$proj]=1; order+=("$proj"); fi
+    else
+      names+=("$name")
+    fi
   done
-  printf '%s\n' "$names" ${hints[@]+"${hints[@]}"}
+  for site in ${order[@]+"${order[@]}"}; do printf 'ddev stop %s\n' "$site"; done
+  if [ "${#names[@]}" -gt 0 ]; then printf 'docker %s %s\n' "$verb" "${names[*]}"; fi
 }
 
-# Why kill project will not touch a project that runs only in containers
-docker_project_refusal() {  # <project root> <comma separated ids>
-  local tilde='~' root h
-  local -a s=()
-  root=${1/#$HOME\//$tilde/}
-  mapfile -t s < <(docker_stops "$2")
-  printf '%s runs in containers (%s) - %s does not signal container processes.' "$root" "${s[0]}" "$PROG"
-  if [ "${#s[@]}" -eq 2 ]; then
-    printf '\n       stop it with: %s' "${s[1]}"
-  else
-    for h in "${s[@]:1}"; do printf '\n       stop with: %s' "$h"; done
-  fi
+# the containers kill is about to stop, and the exact commands it will run
+container_stop_preview() {  # <comma separated ids> <plan lines...>
+  local ids=$1 id name shown="" line
+  shift
+  for id in ${ids//,/ }; do
+    name=""
+    IFS=$'\t' read -r _ name _ < <(docker_snap | awk -F'\t' -v id="$id" '$1 == id')
+    [ -n "$name" ] && shown+="${shown:+, }$name"
+  done
+  printf '%sWILL STOP CONTAINERS%s  %s(through Docker, not a signal)%s\n' \
+    "$C_B" "$C_0" "$C_DIM" "$C_0"
+  printf '  %s\n' "$shown"
+  for line in "$@"; do printf '  %s$ %s%s\n' "$C_C" "$line" "$C_0"; done
 }
 
-# Why kill port will not touch a container's port, and what stops it instead:
-# one stop command per container, since each may need a different one
-docker_refusal() {  # <port> <comma separated ids>
-  local id name kind proj hint="" stops="" n=0
+# Run the plan. Its commands get no stdin, so nothing can sit waiting on a
+# keyboard, and a failure is said and returned rather than passed over.
+container_stop_run() {  # <plan lines...>
+  local line rc=0
+  local -a argv=()
+  for line in "$@"; do
+    read -ra argv <<< "$line"
+    [ "${argv[0]}" = ddev ] && argv[0]=${DEVPS_DDEV:-ddev}
+    printf '%s$ %s%s\n' "$C_DIM" "$line" "$C_0"
+    if ! "${argv[@]}" < /dev/null; then
+      rc=1
+      printf '%s  failed: %s%s\n' "$C_R" "$line" "$C_0"
+    fi
+  done
+  if [ "$rc" = 0 ]; then printf '%s  stopped the containers%s\n' "$C_G" "$C_0"; fi
+  return "$rc"
+}
+
+# Is any of these containers one DDEV shares between every project. The
+# router answers 80 and 443 for all of them, so stopping it for one port
+# stops every site, and kill port will not.
+docker_shared() {  # <comma separated ids>
+  local id
+  for id in ${1//,/ }; do
+    docker_snap | awk -F'\t' -v id="$id" '$1 == id && $4 == "ddev-shared" { f = 1 } END { exit !f }' &&
+      return 0
+  done
+  return 1
+}
+docker_shared_refusal() {  # <port> <comma separated ids>
+  local id name=""
   for id in ${2//,/ }; do
-    IFS=$'\t' read -r _ name _ kind proj _ < <(docker_snap | awk -F'\t' -v id="$id" '$1 == id')
-    hint=$(docker_stop_hint "$kind" "$proj" "$name")
-    stops+=$'\n'"       stop $name with: $hint"
-    n=$(( n + 1 ))
+    name=$(docker_snap | awk -F'\t' -v id="$id" '$1 == id && $4 == "ddev-shared" { print $2; exit }')
+    [ -n "$name" ] && break
   done
-  if [ "$n" -eq 1 ]; then
-    printf 'port %s is published by the container %s - %s does not signal container processes.\n       stop it with: %s' \
-      "$1" "$name" "$PROG" "$hint"
-  else
-    printf 'port %s is published by %d containers - %s does not signal container processes.%s' \
-      "$1" "$n" "$PROG" "$stops"
-  fi
+  printf 'port %s is published by the container %s, which every DDEV project shares - %s will not stop it for one port.\n       stop it with: %s' \
+    "$1" "$name" "$PROG" "$(docker_stop_hint ddev-shared - "$name")"
 }
 
 # "id<TAB>rss<TAB>procs" for each container whose processes this kernel can
@@ -1336,8 +1366,8 @@ pids_table() {
 
 # ------------------------------------------------------------------- kill ----
 kill_cmd() {
-  local kind="" target="" assume_yes=0 sig=TERM dry=0 a r p
-  local -a roots=() pids=() skipped=() all=() climbed=() dnote=()
+  local kind="" target="" assume_yes=0 sig=TERM dry=0 a r p stop_cids=""
+  local -a roots=() pids=() skipped=() all=() climbed=() plan=()
 
   for a in "$@"; do
     case "$a" in
@@ -1367,7 +1397,8 @@ kill_cmd() {
       # A container's port is forwarded by docker-proxy, whose climb ends at
       # dockerd, or on a Mac by Docker Desktop's own backend. Neither is the
       # thing to stop, so they are dropped, and a port with nothing else on it
-      # is pointed at the command that stops the container instead.
+      # stops its container instead, through Docker - unless the container is
+      # DDEV's router, which every DDEV project shares.
       local dids
       local -a kept=()
       docker_ready
@@ -1375,9 +1406,12 @@ kill_cmd() {
       if [ -n "$dids" ]; then
         for r in ${roots[@]+"${roots[@]}"}; do is_docker_forwarder "$r" || kept+=("$r"); done
         roots=(${kept[@]+"${kept[@]}"})
-        [ "${#roots[@]}" -gt 0 ] || die "$(docker_refusal "$target" "$dids")"
+        if [ "${#roots[@]}" -eq 0 ]; then
+          docker_shared "$dids" && die "$(docker_shared_refusal "$target" "$dids")"
+          stop_cids=$dids
+        fi
       fi
-      if [ "${#roots[@]}" -eq 0 ]; then
+      if [ "${#roots[@]}" -eq 0 ] && [ -z "$stop_cids" ]; then
         # Points at a read, never at "sudo kill": climbing from a root-owned
         # listener stops at whatever pid 1 started, and for a Docker port that
         # is dockerd itself, with every container under it.
@@ -1385,8 +1419,10 @@ kill_cmd() {
           die "port $target is held by another user - not yours to stop (see who: sudo $PROG port $target)"
         die "nothing is listening on port $target (try: $PROG ports)"
       fi
-      for r in "${roots[@]}"; do climbed+=("$(climb "$r")"); done
-      mapfile -t roots < <(printf '%s\n' "${climbed[@]}" | sort -u)
+      if [ "${#roots[@]}" -gt 0 ]; then
+        for r in "${roots[@]}"; do climbed+=("$(climb "$r")"); done
+        mapfile -t roots < <(printf '%s\n' "${climbed[@]}" | sort -u)
+      fi
       ;;
     pid)
       case "$target" in *[!0-9]*) die "pid must be a number" ;; esac
@@ -1404,7 +1440,7 @@ kill_cmd() {
       [ "${#roots[@]}" -gt 0 ] || die "no processes in group '$target'"
       ;;
     project)
-      local hits distinct cids want=$target phys
+      local hits distinct want=$target phys
       docker_ready
       # A path is matched as the physical path every root is read back as, so
       # one given through a symlink - /tmp and /var on a Mac - still names it.
@@ -1422,84 +1458,36 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
       fi
       mapfile -t roots < <(printf '%s\n' "$hits" | awk -F'\t' '$3 == "-" { print $2 }' | sort -un)
       # A project can run partly or wholly in containers. Their processes are
-      # never signalled: they are root's, and the clean stop is Docker's. So
-      # they are named with the command that stops them, and a project that
-      # is only containers is refused with it.
-      cids=$(printf '%s\n' "$hits" | awk -F'\t' '$3 != "-" && !s[$3]++ { o = o (o ? "," : "") $3 } END { print o }')
-      if [ -n "$cids" ]; then
-        # Refused on what could be signalled, not on what matched. The
-        # caller's own shell, and the helpers devps ran while it looked, match
-        # a project they sit in and are filtered out further down, which
-        # left a project of containers with nothing to kill and no stop said.
-        local live=0 hr
-        for hr in ${roots[@]+"${roots[@]}"}; do
-          if pid_alive "$hr" && ! is_protected "$hr"; then live=$(( live + 1 )); fi
-        done
-        [ "$live" -gt 0 ] || die "$(docker_project_refusal "$distinct" "$cids")"
-        mapfile -t dnote < <(docker_stops "$cids")
-      fi
+      # never signalled - they are root's, and the clean stop is Docker's -
+      # so its containers go to Docker, alongside its host processes.
+      stop_cids=$(printf '%s\n' "$hits" | awk -F'\t' '$3 != "-" && !s[$3]++ { o = o (o ? "," : "") $3 } END { print o }')
       ;;
   esac
 
-  for r in "${roots[@]}"; do
+  for r in ${roots[@]+"${roots[@]}"}; do
     if is_protected "$r"; then skipped+=("$r"); continue; fi
     all+=("$r")
     mapfile -t -O "${#all[@]}" all < <(descendants "$r")
   done
-  if [ "${#all[@]}" -eq 0 ]; then
-    printf '%sNothing to kill - every match is your own session%s\n' "$C_Y" "$C_0"
-    return 1
-  fi
-
-  for p in $(printf '%s\n' "${all[@]}" | sort -un); do
+  for p in $(printf '%s\n' ${all[@]+"${all[@]}"} | sort -un); do
     pid_alive "$p" || continue
     if is_protected "$p"; then skipped+=("$p"); else pids+=("$p"); fi
   done
+  if [ -n "$stop_cids" ]; then mapfile -t plan < <(container_stop_plan "$stop_cids" "$sig"); fi
 
-  if [ "${#pids[@]}" -eq 0 ]; then
+  if [ "${#pids[@]}" -eq 0 ] && [ "${#plan[@]}" -eq 0 ]; then
     printf '%sNothing to kill' "$C_Y"
     [ "${#skipped[@]}" -gt 0 ] && printf ' - every match is your own session'
     printf '%s\n' "$C_0"
     return 1
   fi
 
-  # One snapshot answers both the table and the totals. It used to fork a ps
-  # per victim for the rows and re-read /proc/<pid>/status for the cost, which
-  # asked the kernel for the same numbers twice and tied the preview to Linux.
-  # snapshot already carries pid, rss, swap, etimes and args for both.
-  #
-  # A victim missing from the snapshot still gets a row. It is a pid we are
-  # about to signal, and silently dropping it would understate what is being
-  # stopped - the same failure as showing no rows at all.
-  local vic
-  vic=$( { printf 'P\t%s\n' "${pids[@]}"; snapshot; } | awk -F'\t' '
-    $1 == "P" { want[$2] = 1; order[++n] = $2; next }
-    ($1 in want) { seen[$1] = 1; print }
-    END { for (i = 1; i <= n; i++)
-            if (!(order[i] in seen)) printf "%s\t0\t0\t0\t0\t?\t?\n", order[i] }')
-
-  printf '%sWILL STOP%s  %s(SIG%s)%s\n' "$C_B" "$C_0" "$C_DIM" "$sig" "$C_0"
-  printf '%s\n' "$vic" | awk -F'\t' "$AWKLIB"'
-    BEGIN { printf "  %7s %8s %8s  %s\n", "PID", "RAM", "UPTIME", "COMMAND" }
-    { printf "  %7s %8s %8s  %s\n", $1, hum($2), dur($4), shorten($7, 56) }'
-
-  local freed
-  freed=$(printf '%s\n' "$vic" | awk -F'\t' '
-    { r += $2; s += $3 } END { print r "+" s }')
-  printf '  %s%d process(es), frees about %s RAM and %s swap%s\n' "$C_DIM" \
-    "${#pids[@]}" "$(hum_kb "${freed%%+*}")" "$(hum_kb "${freed##*+}")" "$C_0"
-
+  if [ "${#pids[@]}" -gt 0 ]; then kill_preview "$sig" "${pids[@]}"; fi
   if [ "${#skipped[@]}" -gt 0 ]; then
     printf '  %skeeping %d pid(s) - your own shell/session: %s%s\n' \
       "$C_G" "${#skipped[@]}" "${skipped[*]}" "$C_0"
   fi
-
-  if [ "${#dnote[@]}" -gt 0 ]; then
-    local h
-    printf '  %snot stopping %s - containers, which %s does not signal%s\n' \
-      "$C_Y" "${dnote[0]}" "$PROG" "$C_0"
-    for h in "${dnote[@]:1}"; do printf '  %sstop them with: %s%s\n' "$C_DIM" "$h" "$C_0"; done
-  fi
+  if [ "${#plan[@]}" -gt 0 ]; then container_stop_preview "$stop_cids" "${plan[@]}"; fi
 
   if [ "$dry" = 1 ]; then
     printf '\n  %sdry run - nothing was killed%s\n' "$C_Y" "$C_0"; return 0
@@ -1516,14 +1504,52 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
     case "$reply" in y|Y|yes|YES) ;; *) printf 'aborted\n'; return 1 ;; esac
   fi
 
-  for p in "${pids[@]}"; do
+  local rc=0
+  if [ "${#pids[@]}" -gt 0 ]; then kill_signal "$sig" "${pids[@]}"; fi
+  if [ "${#plan[@]}" -gt 0 ]; then container_stop_run "${plan[@]}" || rc=1; fi
+  return "$rc"
+}
+
+# What kill is about to signal, and what that frees.
+#
+# One snapshot answers both the table and the totals. It used to fork a ps
+# per victim for the rows and re-read /proc/<pid>/status for the cost, which
+# asked the kernel for the same numbers twice and tied the preview to Linux.
+# snapshot already carries pid, rss, swap, etimes and args for both.
+#
+# A victim missing from the snapshot still gets a row. It is a pid we are
+# about to signal, and silently dropping it would understate what is being
+# stopped - the same failure as showing no rows at all.
+kill_preview() {  # <sig> <pid...>
+  local sig=$1 vic freed
+  shift
+  vic=$( { printf 'P\t%s\n' "$@"; snapshot; } | awk -F'\t' '
+    $1 == "P" { want[$2] = 1; order[++n] = $2; next }
+    ($1 in want) { seen[$1] = 1; print }
+    END { for (i = 1; i <= n; i++)
+            if (!(order[i] in seen)) printf "%s\t0\t0\t0\t0\t?\t?\n", order[i] }')
+
+  printf '%sWILL STOP%s  %s(SIG%s)%s\n' "$C_B" "$C_0" "$C_DIM" "$sig" "$C_0"
+  printf '%s\n' "$vic" | awk -F'\t' "$AWKLIB"'
+    BEGIN { printf "  %7s %8s %8s  %s\n", "PID", "RAM", "UPTIME", "COMMAND" }
+    { printf "  %7s %8s %8s  %s\n", $1, hum($2), dur($4), shorten($7, 56) }'
+
+  freed=$(printf '%s\n' "$vic" | awk -F'\t' '
+    { r += $2; s += $3 } END { print r "+" s }')
+  printf '  %s%d process(es), frees about %s RAM and %s swap%s\n' "$C_DIM" \
+    "$#" "$(hum_kb "${freed%%+*}")" "$(hum_kb "${freed##*+}")" "$C_0"
+}
+
+# Signal the pids, give them five seconds to go, and say how that went
+kill_signal() {  # <sig> <pid...>
+  local sig=$1 p i=0 alive=0
+  shift
+  for p in "$@"; do
     if pid_alive "$p"; then kill "-$sig" "$p" || true; fi
   done
-
-  local i=0 alive=0
   while [ "$i" -lt 20 ]; do
     alive=0
-    for p in "${pids[@]}"; do
+    for p in "$@"; do
       if pid_alive "$p"; then alive=$(( alive + 1 )); fi
     done
     [ "$alive" -eq 0 ] && break
@@ -1531,7 +1557,7 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
   done
 
   if [ "$alive" -eq 0 ]; then
-    printf '%s  stopped %d process(es)%s\n' "$C_G" "${#pids[@]}" "$C_0"
+    printf '%s  stopped %d process(es)%s\n' "$C_G" "$#" "$C_0"
   else
     printf '%s  %d process(es) ignored SIG%s - rerun with -9 to force%s\n' \
       "$C_Y" "$alive" "$sig" "$C_0"
@@ -3041,16 +3067,18 @@ ${C_B}LOOKING${C_0}
   ${C_C}$PROG watch${C_0} [secs]         alias for dash
 
 ${C_B}STOPPING${C_0}
-  ${C_C}$PROG kill port${C_0} <n>        stop whatever serves port n, plus its children
+  ${C_C}$PROG kill port${C_0} <n>        stop what serves port n: a process, or its container
   ${C_C}$PROG kill pid${C_0} <n>         stop one process plus its children
   ${C_C}$PROG kill group${C_0} <name>    stop every process in a group
   ${C_C}$PROG kill project${C_0} <name>  stop everything running in one project
 
   Kill previews exactly what dies and how much it frees, then asks.
   It refuses to touch your own shell or the session you are typing in.
+  A container is stopped through Docker, never signalled: ddev stop for
+  a DDEV site, docker stop for the rest.
 
   ${C_DIM}-y${C_0}   skip the confirmation
-  ${C_DIM}-9${C_0}   SIGKILL instead of SIGTERM (if it ignored the polite ask)
+  ${C_DIM}-9${C_0}   SIGKILL instead of SIGTERM, docker kill for a container
   ${C_DIM}-d${C_0}   dry run - show the victims, kill nothing
 
 ${C_B}DASHBOARD${C_0} ${C_DIM}($PROG dash)${C_0}

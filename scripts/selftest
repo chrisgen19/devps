@@ -270,9 +270,9 @@ fake_bin=$(mktemp -d)
 printf '#!/bin/sh\n[ "$FAKE_ENDPOINT" = fail ] && exit 1\necho "$FAKE_ENDPOINT"\n' > "$fake_bin/docker"
 chmod +x "$fake_bin/docker"
 ctx_rows() {  # <endpoint the CLI resolves> [DOCKER_HOST]
-  ( export PATH="$fake_bin:$PATH" DOCKER_CONTEXT=prod FAKE_ENDPOINT=$1
-    if [ -n "${2:-}" ]; then export DOCKER_HOST=$2; else unset DOCKER_HOST; fi
-    DEVPS_DOCKER_PS="$dps" docker_rows ) | awk 'END { print NR }'
+  ( if [ -n "${2:-}" ]; then export DOCKER_HOST=$2; else unset DOCKER_HOST; fi
+    PATH="$fake_bin:$PATH" DOCKER_CONTEXT=prod FAKE_ENDPOINT=$1 DEVPS_DOCKER_PS="$dps" \
+      docker_rows ) | awk 'END { print NR }'
 }
 same "a context pointing at another host is remote" "$(ctx_rows ssh://deploy@build.example.com)" 0
 same "a context on a local socket is not" "$(ctx_rows unix:///run/user/1000/docker.sock)" 5
@@ -315,6 +315,19 @@ else
   fi
 fi
 
+# Stand-ins for the docker and ddev CLIs, for every kill below that stops a
+# container. They only write down how they were called, so no test can stop
+# a real container or a real DDEV site. ddev often lives in /usr/bin, beyond
+# the reach of a PATH prefix, which is why DEVPS_DDEV names this one.
+fake_cli=$(mktemp -d)
+fake_log="$fake_cli/calls"
+for cli in docker ddev; do
+  # shellcheck disable=SC2016  # written into the stand-in, which expands it
+  printf '#!/bin/sh\necho "%s $*" >> "%s"\n[ -z "$FAKE_FAIL" ]\n' "$cli" "$fake_log" > "$fake_cli/$cli"
+  chmod +x "$fake_cli/$cli"
+done
+stops() { grep -E '^(docker|ddev) (stop|kill)' "$fake_log"; }
+
 group "docker: a published port names its container"
 # The captured containers again, now behind listening sockets: 80 and 32854
 # with no pid to show, as docker-proxy's are to anyone but root; 8025 held by a
@@ -340,7 +353,8 @@ printf '%s\n' "/proc/$inner_pid/cgroup:docker-$idw" > "$cgf"
 lsn=$(mktemp)
 printf '%s\t%s\n' 80 '' 5432 '' 8025 "$fwd_pid" 8026 "$rlk_pid" 8080 '' \
   32854 '' 32855 "$plain_pid" > "$lsn"
-dk() { DEVPS_LISTENERS="$lsn" DEVPS_DOCKER_PS="$dps" DEVPS_CGROUPS="$cgf" "$DEVPS" "$@"; }
+dk() { PATH="$fake_cli:$PATH" DEVPS_DDEV="${DEVPS_DDEV:-$fake_cli/ddev}" \
+  DEVPS_LISTENERS="$lsn" DEVPS_DOCKER_PS="$dps" DEVPS_CGROUPS="$cgf" "$DEVPS" "$@"; }
 dk_ports=$(dk ports)
 port_row() { printf '%s\n' "$dk_ports" | awk -v p="$1" '$1 == p'; }
 
@@ -380,10 +394,30 @@ has "or rootless Docker's, which would take every container with it" \
   "$(dk kill port 8026 -d 2>&1 > /dev/null)" "published by the container ddev-router"
 has "but still stops an ordinary process that shares a published port" \
   "$(dk kill port 32855 -d)" "$plain_pid"
-kill_out=$(dk kill port 8080 -d 2>&1 > /dev/null)
-has "kill port on a shared port gives a stop for each container" "$kill_out" \
-  "stop web-a with: docker compose -p proja stop"
-has "including the second" "$kill_out" "stop web-b with: docker compose -p projb stop"
+has "kill port on a port two containers share stops both" \
+  "$(dk kill port 8080 -d)" '$ docker stop web-a web-b'
+
+# A container's port is stopped through Docker, previewed and confirmed like
+# a process. A DDEV container goes to ddev stop, which tidies what DDEV set
+# up around it; without the ddev CLI, and under -9, docker does it by name.
+: > "$fake_log"
+has "kill port hands a DDEV container to ddev stop" "$(dk kill port 32854 -d)" '$ ddev stop aha'
+same "and a dry run runs nothing" "$(stops)" ""
+dk kill port 32854 -y > /dev/null
+same "for real, it runs exactly what it showed" "$(stops)" "ddev stop aha"
+: > "$fake_log"
+DEVPS_DDEV=/nonexistent/ddev dk kill port 32854 -y > /dev/null
+same "without the ddev CLI the container goes to docker stop" "$(stops)" "docker stop ddev-aha-web"
+: > "$fake_log"
+dk kill port 32854 -9 -y > /dev/null
+same "and -9 is docker kill" "$(stops)" "docker kill ddev-aha-web"
+: > "$fake_log"
+rejects "a stop that fails is a failure" env FAKE_FAIL=1 PATH="$fake_cli:$PATH" \
+  DEVPS_DDEV="$fake_cli/ddev" DEVPS_LISTENERS="$lsn" DEVPS_DOCKER_PS="$dps" \
+  DEVPS_CGROUPS="$cgf" "$DEVPS" kill port 32854 -y
+: > "$fake_log"
+dk kill port 80 -y > /dev/null 2>&1
+same "and the router, shared by every DDEV project, is never stopped for one port" "$(stops)" ""
 
 # The dashboard needs a terminal, so its keys are checked in the source: in
 # the ports view, X must go through kill port as x does. Through kill pid it
@@ -478,7 +512,8 @@ printf '%s\n' "/proc/$s_web/cgroup:docker-$idw" "/proc/$s_router/cgroup:docker-$
 sleep 1
 # by absolute path: some of these run from inside a project directory
 devps_abs="$PWD/$DEVPS"
-dp() { DEVPS_DOCKER_PS="$dps" DEVPS_CGROUPS="$cgf" "$devps_abs" "$@"; }
+dp() { PATH="$fake_cli:$PATH" DEVPS_DDEV="$fake_cli/ddev" \
+  DEVPS_DOCKER_PS="$dps" DEVPS_CGROUPS="$cgf" "$devps_abs" "$@"; }
 proj_out=$(dp projects)
 proj_row() { printf '%s\n' "$proj_out" | awk -v p="$1" 'index($0, p) && substr($0, length($0) - length(p) + 1) == p'; }
 
@@ -495,63 +530,66 @@ same "and the symlinked path it was given does not get a row of its own" \
 same "with Docker off, none of it is claimed" \
   "$(DEVPS_DOCKER=0 DEVPS_DOCKER_PS="$dps" DEVPS_CGROUPS="$cgf" "$DEVPS" projects | grep -c '/home/u/wp/aha')" 0
 
-# -d throughout. A project that is only containers is refused with its stop.
-rejects "kill project refuses a project that runs only in containers" dp kill project /home/u/wp/aha -d
-kill_err=$(dp kill project /home/u/wp/aha -d 2>&1 > /dev/null)
-has "and names the containers" "$kill_err" "runs in containers (ddev-aha-web)"
-has "and the command that stops them" "$kill_err" "stop it with: ddev stop aha"
-# A mixed project stops its host process and leaves its container alone,
-# named here through the symlink, which kill project resolves.
+# -d throughout, until the one real run at the end. A project that is only
+# containers goes to Docker whole.
+kill_out=$(dp kill project /home/u/wp/aha -d)
+has "kill project hands a project of containers to ddev stop" "$kill_out" '$ ddev stop aha'
+has "and names its containers" "$kill_out" "ddev-aha-web"
+# A mixed project signals its host process, never the process in its
+# container, which goes to Docker instead. Named here through the symlink,
+# which kill project resolves.
 kill_out=$(dp kill project "$walk_link" -d)
 same "a mixed project stops its host process, never the container's" \
   "$(printf '%s\n' "$kill_out" | awk -v h="$s_host" -v c="$s_walk" '
      $1 == h { host = 1 } $1 == c { cont = 1 } END { print host "" (cont ? "-signalled" : "") }')" 1
-has "and says which containers it left, and how to stop them" "$kill_out" \
-  "not stopping shop-web - containers"
-has "including the stop command" "$kill_out" "stop them with: docker compose -p shopw stop"
+has "and hands its container to Docker" "$kill_out" '$ docker stop shop-web'
 
 # A bare name is a name, even when a directory called that sits where devps
 # runs: resolving it as a path would look in the wrong place entirely.
 decoy=$(mktemp -d)
 mkdir "$decoy/$(basename "$walk")"
 has "a project name is not taken for a same-named directory in the cwd" \
-  "$(cd "$decoy" && dp kill project "$(basename "$walk")" -d)" "not stopping shop-web"
+  "$(cd "$decoy" && dp kill project "$(basename "$walk")" -d)" '$ docker stop shop-web'
 rm -rf "$decoy"
 
 # Run from a shell inside a project of containers, that shell matches the
-# project too, and is protected. The refusal has to see through it, or the
-# answer is "nothing to kill" with no word of how to stop the containers.
-has "kill project from inside a containers-only project still says how to stop it" \
-  "$(cd "$solo" && dp kill project . -d 2>&1 > /dev/null)" "stop it with: ddev stop solo"
+# project too, and is protected. The containers still have to be stopped,
+# not lost behind "nothing to kill - every match is your own session".
+has "kill project from inside a containers-only project still stops its containers" \
+  "$(cd "$solo" && dp kill project . -d)" '$ ddev stop solo'
 
 # Under Docker Desktop the processes run in a VM, and no cgroup on this
 # machine names a container. docker ps still knows every container and its
 # project, so the projects are still listed, cost unknown, and still refused
 # or noted with their stop. An empty cgroup fixture plays the VM.
 cg_none=$(mktemp)
-dd() { DEVPS_DOCKER_PS="$dps" DEVPS_CGROUPS="$cg_none" "$devps_abs" "$@"; }
+dd() { PATH="$fake_cli:$PATH" DEVPS_DDEV="$fake_cli/ddev" \
+  DEVPS_DOCKER_PS="$dps" DEVPS_CGROUPS="$cg_none" "$devps_abs" "$@"; }
 desk_out=$(dd projects)
 desk_row() { printf '%s\n' "$desk_out" | awk -v p="$1" 'substr($0, length($0) - length(p) + 1) == p'; }
 same "under Docker Desktop a project of containers keeps its row and ports, cost unknown" \
   "$(desk_row /home/u/wp/aha | awk '{ print $1, $2, $4 }')" "- - 32854,32855"
 has "and DDEV shared keeps its row" "$(desk_row '(DDEV shared)')" "80,8025,8026"
-has "kill project still refuses it with its stop, with no process in sight" \
-  "$(dd kill project /home/u/wp/aha -d 2>&1 > /dev/null)" "stop it with: ddev stop aha"
-has "and a mixed project still names the containers it leaves" \
-  "$(dd kill project "$walk_link" -d)" "not stopping shop-web"
+has "kill project still stops it, with no process in sight" \
+  "$(dd kill project /home/u/wp/aha -d)" '$ ddev stop aha'
+has "and a mixed project still hands its container to Docker" \
+  "$(dd kill project "$walk_link" -d)" '$ docker stop shop-web'
 rm -f "$cg_none"
 
-# And for real, not a dry run: the host process goes, the container's stays.
+# And for real, not a dry run: the host process is signalled and goes, the
+# process in the container is not, and the container goes to Docker.
+: > "$fake_log"
 dp kill project "$walk_link" -y > /dev/null
 for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$s_host" 2> /dev/null || break; sleep 0.5; done
 same "a real kill project stops the host process" \
   "$(kill -0 "$s_host" 2> /dev/null && echo alive || echo gone)" gone
 same "and leaves the process in the container running" \
   "$(kill -0 "$s_walk" 2> /dev/null && echo alive || echo gone)" alive
+same "while the container itself is stopped through Docker" "$(stops)" "docker stop shop-web"
 
 kill "$s_web" "$s_router" "$s_run" "$s_shop" "$s_walk" "$s_host" "$s_solo" 2>/dev/null || true
 wait "$s_web" "$s_router" "$s_run" "$s_shop" "$s_walk" "$s_host" "$s_solo" 2>/dev/null || true
-rm -rf "$walk" "$solo"; rm -f "$walk_link" "$dps" "$cgf"
+rm -rf "$walk" "$solo" "$fake_cli"; rm -f "$walk_link" "$dps" "$cgf"
 
 group "project attribution reaches deep working directories"
 # a pnpm store or a monorepo package can sit a dozen levels under its own root;
