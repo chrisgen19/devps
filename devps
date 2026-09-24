@@ -781,10 +781,10 @@ docker_ready() { [ "$DOCKER_LOADED" = 1 ] || docker_load; }
 # a row about to be shown is in one - devps top rarely is.
 container_tagmap() {
   local inside
-  inside=$({ container_pids | sed 's/^/C\t/'; sed 's/^/P\t/'; } |
+  inside=$({ container_pids | tagged C; tagged P; } |
     awk -F'\t' '$1 == "C" { c[$2] = $3; next } ($2 in c) { print $2 "\t" c[$2] }')
   [ -n "$inside" ] || return 0
-  { docker_snap | awk -F'\t' '{ print "D\t" $1 "\t" $2 }'; printf '%s\n' "$inside" | sed 's/^/I\t/'; } |
+  { docker_snap | awk -F'\t' '{ print "D\t" $1 "\t" $2 }'; printf '%s\n' "$inside" | tagged I; } |
     awk -F'\t' '$1 == "D" { n[$2] = $3; next } ($3 in n) { printf "%s=%s|", $2, n[$3] }'
 }
 
@@ -810,7 +810,7 @@ is_docker_forwarder() {
 # listeners reports ports, not addresses, so both go on the one row: ids is
 # comma separated, and the label names the first and counts the rest.
 docker_port_labels() {
-  { docker_snap | sed 's/^/D\t/'; docker_ports | sed 's/^/P\t/'; } |
+  { docker_snap | tagged D; docker_ports | tagged P; } |
     awk -F'\t' -v HOME="$HOME" '
       $1 == "D" { name[$2] = $3; kind[$2] = $5; root[$2] = $7; next }
       $1 == "P" && ($3 in name) {
@@ -850,7 +850,7 @@ docker_refusal() {  # <port> <comma separated ids>
 # "id<TAB>rss<TAB>procs" for each container whose processes this kernel can
 # see - none at all under Docker Desktop, whose containers run in a VM
 container_rss() {
-  { container_pids | sed 's/^/C\t/'; ps -eo pid=,rss= | awk '{ print "R\t" $1 "\t" $2 }'; } |
+  { container_pids | tagged C; ps -eo pid=,rss= | awk '{ print "R\t" $1 "\t" $2 }'; } |
     awk -F'\t' '
       $1 == "C" { cid[$2] = $3; next }
       ($2 in cid) { rss[cid[$2]] += $3; n[cid[$2]]++ }
@@ -962,6 +962,11 @@ redact_line() { awk "$AWKLIB"'{ print redact($0) }'; }
 # snapshots and divides by the time between them.
 DP_IO=0        # reading /proc/<pid>/io for every process is a third of the
                # snapshot's cost, so only the callers that show it opt in
+# tagged <tag>: prefix each line of stdin with the tag and a tab, so several
+# streams can be merged into one awk that tells them apart by $1. Not sed:
+# BSD sed has not always read \t in a replacement as a tab.
+tagged() { awk -v t="$1" '{ print t "\t" $0 }'; }
+
 snapshot() { "snapshot_$DP_PLATFORM"; }
 
 snapshot_linux() {
@@ -1909,10 +1914,10 @@ dash_port_raw() {
 # processes from the same sample - the rule ports_table follows, so the two
 # views cannot disagree about who owns a port.
 dash_port_fmt() {
-  { printf '%s\n' "$SNAP_ROWS" | sed 's/^/S\t/'
-    docker_port_labels | sed 's/^/L\t/'
-    if [ -n "$DOCKER_SNAP" ]; then container_pids | sed 's/^/C\t/'; fi
-    printf '%s\n' "$1" | sed 's/^/P\t/'
+  { printf '%s\n' "$SNAP_ROWS" | tagged S
+    docker_port_labels | tagged L
+    if [ -n "$DOCKER_SNAP" ]; then container_pids | tagged C; fi
+    printf '%s\n' "$1" | tagged P
   } | awk -F'\t' -v CD="$C_DIM" -v C0="$C_0" -v CG="$C_G" -v CY="$C_Y" -v CC="$C_C" \
       -v W="$TCOLS" -v PROG="$PROG" -v FWD="$DOCKER_FWD_RE" "$AWKLIB"'
     function fwd(a,   e) { e = a; sub(/ .*/, "", e); sub(/^.*\//, "", e); return e ~ FWD }
@@ -2505,7 +2510,7 @@ PROOTLIB='
 
 # TSV: root  procs  rss  swap  ports  onmnt   (rss desc, the buckets last)
 project_scan() {
-  { port_map; cwd_map; snap | sed 's/^/S\t/'; } | awk -F'\t' -v MARK="$PROJECT_MARKERS" \
+  { port_map; cwd_map; snap | tagged S; } | awk -F'\t' -v MARK="$PROJECT_MARKERS" \
   "$PROOTLIB"'
   $1 == "C" { cwd[$2] = $3; next }
   $1 == "P" { if (!($2 in pt) || index(pt[$2], $3) == 0) pt[$2] = pt[$2] (pt[$2] ? "," : "") $3; next }
@@ -2540,7 +2545,7 @@ project_scan() {
 # "root<TAB>pid" for every process of the named project. The name matches a
 # full path, a ~-relative path, or the last path component.
 project_pids() {
-  { cwd_map; snap | sed 's/^/S\t/'; } | awk -F'\t' -v MARK="$PROJECT_MARKERS" \
+  { cwd_map; snap | tagged S; } | awk -F'\t' -v MARK="$PROJECT_MARKERS" \
     -v WANT="$1" -v HOME="$HOME" "$PROOTLIB"'
     $1 == "C" { cwd[$2] = $3; next }
     $1 == "S" {

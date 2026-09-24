@@ -308,7 +308,7 @@ else
     "$(docker_rows | awk 'END { print NR }')" "$(docker ps -q | awk 'END { print NR }')"
   if [ "$PLAT" = Linux ] && pgrep -x dockerd > /dev/null; then
     same "every running container's processes are found through cgroups" \
-      "$({ container_pids | sed 's/^/P\t/'; docker_rows | sed 's/^/D\t/'; } | awk -F'\t' '
+      "$({ container_pids | awk '{ print "P\t" $0 }'; docker_rows | awk '{ print "D\t" $0 }'; } | awk -F'\t' '
           $1 == "P" { seen[$3] = 1; next } !($2 in seen) { print $3 }')" ""
   else
     skip "container processes (the daemon is not on this kernel)"
