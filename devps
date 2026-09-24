@@ -717,6 +717,67 @@ container_pids() {
     awk "$AWKCGROUP"
 }
 
+# Load the rows once, in the caller's shell, unless a caller already has
+docker_ready() { [ "$DOCKER_LOADED" = 1 ] || docker_load; }
+
+# The processes that forward a published port into a container. Linux runs a
+# docker-proxy per binding; Docker Desktop on macOS listens in its backend.
+# Either one is plumbing: the port belongs to the container behind it, and
+# signalling the forwarder takes the port - or on a Mac, all of Docker - down.
+# Bracketed dots rather than escaped ones, because awk -v would process the
+# backslashes, and the same pattern has to mean the same thing in both.
+DOCKER_FWD_RE='^(docker-proxy|com[.]docker[.]backend)$'
+is_docker_forwarder() {
+  local exe
+  exe=$(ps -o args= -p "$1" | awk '{ print $1 }')
+  [[ ${exe##*/} =~ $DOCKER_FWD_RE ]]
+}
+
+# "port<TAB>id<TAB>label" for every host port a container publishes, the
+# label being what the ports views print in place of a process
+docker_port_labels() {
+  { docker_snap | sed 's/^/D\t/'; docker_ports | sed 's/^/P\t/'; } |
+    awk -F'\t' -v HOME="$HOME" '
+      $1 == "D" { name[$2] = $3; kind[$2] = $5; root[$2] = $7; next }
+      $1 == "P" && ($3 in name) {
+        r = root[$3]; sub("^" HOME "/", "~/", r)
+        where = (kind[$3] == "ddev-shared") ? "(DDEV shared)" : (r == "-" ? "" : r)
+        printf "%s\t%s\t%s %s%s\n", $2, $3, name[$3], $4, (where == "" ? "" : "  " where) }'
+}
+
+# "id<TAB>rss<TAB>procs" for each container whose processes this kernel can
+# see - none at all under Docker Desktop, whose containers run in a VM
+container_rss() {
+  { container_pids | sed 's/^/C\t/'; ps -eo pid=,rss= | awk '{ print "R\t" $1 "\t" $2 }'; } |
+    awk -F'\t' '
+      $1 == "C" { cid[$2] = $3; next }
+      ($2 in cid) { rss[cid[$2]] += $3; n[cid[$2]]++ }
+      END { for (c in n) printf "%s\t%d\t%d\n", c, rss[c], n[c] }'
+}
+
+# Where a container belongs, and the command that stops it cleanly, by kind.
+# DDEV's own commands come first because they also tidy up what DDEV set up
+# around the containers; the shared router serves every DDEV project, so the
+# only clean stop for it stops them all, and the hint says so.
+docker_where() {  # <kind> <project> <root>
+  local tilde='~' root
+  root=${3/#$HOME\//$tilde/}
+  case "$1" in
+    ddev)        printf '%s  (DDEV project %s)' "$root" "$2" ;;
+    ddev-shared) printf 'shared by every DDEV project  (%s)' "$root" ;;
+    compose)     printf '%s  (compose project %s)' "$root" "$2" ;;
+    *)           printf 'none - started with docker run' ;;
+  esac
+}
+docker_stop_hint() {  # <kind> <project> <name>
+  case "$1" in
+    ddev)        printf 'ddev stop %s' "$2" ;;
+    ddev-shared) printf 'ddev poweroff  (stops every DDEV project)' ;;
+    compose)     printf 'docker compose -p %s stop' "$2" ;;
+    *)           printf 'docker stop %s' "$3" ;;
+  esac
+}
+
 # ------------------------------------------------------------------- psi ----
 # Pressure Stall Information: the share of the last 10s in which tasks were
 # stalled waiting for a resource. "some" means at least one task was blocked,
@@ -1004,14 +1065,25 @@ proc_table() {
 }
 
 ports_table() {
-  local rows port pid rss args ramcol
+  local rows port pid rss args ramcol labels id label
+  local -A dlabel=() did=() drss=()
   rows=$(listeners)
   printf '%sLISTENING PORTS%s\n' "$C_B" "$C_0"
   if [ -z "$rows" ]; then printf '  %s(nothing listening)%s\n\n' "$C_DIM" "$C_0"; return; fi
+  # a published port names its container, whose RAM is all of its processes
+  docker_ready
+  labels=$(docker_port_labels)
+  if [ -n "$labels" ]; then
+    while IFS=$'\t' read -r port id label; do dlabel[$port]=$label; did[$port]=$id; done <<< "$labels"
+    while IFS=$'\t' read -r id rss _; do drss[$id]=$rss; done < <(container_rss)
+  fi
   printf '  %7s %8s %8s  %s\n' "PORT" "PID" "RAM" "PROCESS"
   while IFS=$'\t' read -r port pid; do
     rss=""; args=""
-    if [ -z "$pid" ]; then
+    if [ -n "${dlabel[$port]:-}" ] && { [ -z "$pid" ] || is_docker_forwarder "$pid"; }; then
+      rss=${drss[${did[$port]}]:-}
+      args="${C_C}[docker]${C_0} ${dlabel[$port]:0:49}"
+    elif [ -z "$pid" ]; then
       args="${C_DIM}(another user - run: sudo $PROG ports)${C_0}"
     elif pid_alive "$pid"; then
       rss=$(ps -o rss= -p "$pid" | tr -d ' ')
@@ -1070,17 +1142,24 @@ climb() {
 }
 
 tree_cmd() {
-  local pid="$1" p
+  local pid="$1"
   pid_alive "$pid" || die "no such process: $pid"
   printf '%sPROCESS TREE from %s%s\n' "$C_B" "$pid" "$C_0"
-  { echo "$pid"; descendants "$pid"; } | sort -un | while read -r p; do
+  { echo "$pid"; descendants "$pid"; } | pids_table
+  echo
+}
+
+# pids on stdin -> PID RAM COMMAND, biggest first, with the total under it.
+# Shared by the tree and by a container's process list.
+pids_table() {
+  local p
+  sort -un | while read -r p; do
       if pid_alive "$p"; then ps -o pid=,rss=,args= -p "$p"; fi
     done | sort -k2,2nr | awk "$AWKLIB"'
       BEGIN { printf "  %7s %8s  %s\n", "PID", "RAM", "COMMAND" }
       { a = ""; for (i = 3; i <= NF; i++) a = a (i > 3 ? " " : "") $i
         printf "  %7s %8s  %s\n", $1, hum($2), shorten(a, 64); t += $2; n++ }
       END { printf "  %7s %8s  %s\n", "", hum(t), n " process(es) total" }'
-  echo
 }
 
 # ------------------------------------------------------------------- kill ----
@@ -1113,6 +1192,23 @@ kill_cmd() {
       case "$target" in *[!0-9]*) die "port must be a number" ;; esac
       mapfile -t roots < <(listeners |
         awk -F'\t' -v p="$target" '$1 == p && $2 != "" { print $2 }' | sort -u)
+      # A container's port is forwarded by docker-proxy, whose climb ends at
+      # dockerd, or on a Mac by Docker Desktop's own backend. Neither is the
+      # thing to stop, so they are dropped, and a port with nothing else on it
+      # is pointed at the command that stops the container instead.
+      local dport dname dkind dproj
+      local -a kept=()
+      docker_ready
+      dport=$(docker_port_labels | awk -F'\t' -v p="$target" '$1 == p { print $2; exit }')
+      if [ -n "$dport" ]; then
+        for r in ${roots[@]+"${roots[@]}"}; do is_docker_forwarder "$r" || kept+=("$r"); done
+        roots=(${kept[@]+"${kept[@]}"})
+        if [ "${#roots[@]}" -eq 0 ]; then
+          IFS=$'\t' read -r _ dname _ dkind dproj _ < <(docker_snap | awk -F'\t' -v id="$dport" '$1 == id')
+          die "port $target is published by the container $dname - $PROG does not signal container processes.
+       stop it with: $(docker_stop_hint "$dkind" "$dproj" "$dname")"
+        fi
+      fi
       if [ "${#roots[@]}" -eq 0 ]; then
         # Points at a read, never at "sudo kill": climbing from a root-owned
         # listener stops at whatever pid 1 started, and for a Docker port that
@@ -1306,11 +1402,38 @@ idle_cmd() {
   echo
 }
 
+# A published port, told as its container. Its forwarder is no answer: the
+# climb from docker-proxy ends at dockerd, with every container under it.
+port_container() {  # <port> <id> <container port/proto>
+  local port=$1 id=$2 cport=$3 name image kind proj root pids
+  IFS=$'\t' read -r _ name image kind proj root _ < <(docker_snap | awk -F'\t' -v id="$id" '$1 == id')
+  printf '%sPORT %s%s\n' "$C_B" "$port" "$C_0"
+  printf '  container    : %s  %s%s%s\n' "$name" "$C_DIM" "$image" "$C_0"
+  printf '  forwards to  : %s inside it\n' "$cport"
+  printf '  project      : %s\n' "$(docker_where "$kind" "$proj" "$root")"
+  printf '  stop with    : %s\n' "$(docker_stop_hint "$kind" "$proj" "$name")"
+  echo
+  pids=$(container_pids | awk -F'\t' -v id="$id" '$2 == id { print $1 }')
+  if [ -z "$pids" ]; then
+    printf '  %s(its processes run in a VM Docker manages, out of sight from here)%s\n\n' "$C_DIM" "$C_0"
+    return
+  fi
+  printf '%sPROCESSES in %s%s\n' "$C_B" "$name" "$C_0"
+  printf '%s\n' "$pids" | pids_table
+  echo
+}
+
 port_cmd() {
-  local port="$1" pid root
+  local port="$1" pid root dport
   case "$port" in *[!0-9]*) die "port must be a number" ;; esac
   pid=$(listeners |
     awk -F'\t' -v p="$port" '$1 == p && $2 != "" { print $2 }' | sort -u | head -1)
+  docker_ready
+  dport=$(docker_ports | awk -F'\t' -v p="$port" '$1 == p { print $2 "\t" $3; exit }')
+  if [ -n "$dport" ] && { [ -z "$pid" ] || is_docker_forwarder "$pid"; }; then
+    port_container "$port" "${dport%%$'\t'*}" "${dport#*$'\t'}"
+    return
+  fi
   if [ -z "$pid" ]; then
     port_held_by_other "$port" &&
       die "port $port is held by another user (try: sudo $PROG port $port)"
@@ -1357,6 +1480,7 @@ TROWS=24; TCOLS=80
 FRAME=0
 LAST_US=0
 SAMPLE_US=0
+DOCKER_US=0
 RENDER_S=0.12
 CLK_TCK=100
 PREVF=""
@@ -1499,6 +1623,11 @@ dash_sample() {
   fi
   [ "$PSI_OK" != 1 ] && [ "$DSTATE" -gt 0 ] &&
     ALERTS+=("! $DSTATE process(es) in D state (blocked on disk / page-in)")
+
+  # Containers come and go far less often than processes, and docker ps is
+  # the slowest question in a sample, so it is asked every ten seconds at most.
+  # Which processes are in them is re-read every sample: that costs a grep.
+  if [ $(( us - DOCKER_US )) -ge 10000000 ]; then docker_load; DOCKER_US=$us; fi
 
   SNAP=$(snapshot)
   # join the previous tick counts in, so each row carries a real instant CPU%
@@ -1649,17 +1778,33 @@ dash_port_raw() {
   listeners
 }
 
+# A container's port shows the container, with RAM and CPU summed over its
+# processes from the same sample - the rule ports_table follows, so the two
+# views cannot disagree about who owns a port.
 dash_port_fmt() {
-  printf '%s\n%s\n' "$SNAP_ROWS" "$1" | awk -F'\t' \
-    -v CD="$C_DIM" -v C0="$C_0" -v CG="$C_G" -v CY="$C_Y" -v W="$TCOLS" -v PROG="$PROG" "$AWKLIB"'
-    NF > 3 { rss[$1] = $2; args[$1] = $7; cpu[$1] = $11 + 0; next }
-    { pid = $2
-      cmd = (pid in args) ? shorten(args[pid], W - 42) \
-          : (pid == "" ? ("(another user - run: sudo " PROG " ports)") : "(exited)")
+  { printf '%s\n' "$SNAP_ROWS" | sed 's/^/S\t/'
+    docker_port_labels | sed 's/^/L\t/'
+    if [ -n "$DOCKER_SNAP" ]; then container_pids | sed 's/^/C\t/'; fi
+    printf '%s\n' "$1" | sed 's/^/P\t/'
+  } | awk -F'\t' -v CD="$C_DIM" -v C0="$C_0" -v CG="$C_G" -v CY="$C_Y" -v CC="$C_C" \
+      -v W="$TCOLS" -v PROG="$PROG" -v FWD="$DOCKER_FWD_RE" "$AWKLIB"'
+    function fwd(a,   e) { e = a; sub(/ .*/, "", e); sub(/^.*\//, "", e); return e ~ FWD }
+    $1 == "S" && $2 != "" { rss[$2] = $3; args[$2] = $8; cpu[$2] = $12 + 0; next }
+    $1 == "L" { lab[$2] = $4; lid[$2] = $3; next }
+    $1 == "C" { if ($2 in rss) { crss[$3] += rss[$2]; ccpu[$3] += cpu[$2]; cin[$3] = 1 }; next }
+    $1 == "P" {
+      pid = $3
+      if (($2 in lab) && (pid == "" || ((pid in args) && fwd(args[pid])))) {
+        id = lid[$2]
+        cmd = CC "[docker]" C0 " " substr(lab[$2], 1, W - 51)
+        ram = (id in cin) ? hum(crss[id]) : "-"; c = (id in cin) ? ccpu[id] : 0
+      } else {
+        cmd = (pid in args) ? shorten(args[pid], W - 42) \
+            : (pid == "" ? ("(another user - run: sudo " PROG " ports)") : "(exited)")
+        ram = (pid in rss) ? hum(rss[pid]) : "-"; c = (pid in cpu) ? cpu[pid] : 0
+      }
       printf "%s%7s%s %s%8s%s %s%8s%s %s%5.1f%%%s  %s\n",
-        CG, $1, C0, CD, (pid == "" ? "-" : pid), C0,
-        CY, (pid in rss ? hum(rss[pid]) : "-"), C0,
-        CD, (pid in cpu ? cpu[pid] : 0), C0, cmd }'
+        CG, $2, C0, CD, (pid == "" ? "-" : pid), C0, CY, ram, C0, CD, c, C0, cmd }'
 }
 
 dash_rows_ports() {
@@ -2583,7 +2728,7 @@ ${C_B}LOOKING${C_0}
   ${C_C}$PROG doctor${C_0}               is this WSL box configured to survive your work
   ${C_C}$PROG group${C_0} <name>         every process in one group
   ${C_C}$PROG ports${C_0}                everything listening
-  ${C_C}$PROG port${C_0} <n>             who owns port n, its project dir, its tree
+  ${C_C}$PROG port${C_0} <n>             who owns port n (process or container), where it lives
   ${C_C}$PROG tree${C_0} <pid>           process tree under a pid
   ${C_C}$PROG dash${C_0} [secs]          live interactive dashboard        (default 2)
   ${C_C}$PROG watch${C_0} [secs]         alias for dash
