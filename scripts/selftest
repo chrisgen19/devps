@@ -442,14 +442,21 @@ group "docker: container processes belong to their project"
 # Throwaway sleeps stand in for processes inside the captured containers: a
 # DDEV site, the DDEV router, a bare docker run, a Compose project with no
 # marker, and one whose working directory sits below its marker. A host
-# process in that last project shares its row with the container.
+# process in that last project shares its row with the container - even
+# though its label reaches the project through a symlink, as a label keeps
+# the path it was given while a cwd reads back physical. On a Mac every temp
+# directory is like this (/var links into /private); here the link is made
+# on purpose, so Linux tests it too.
 walk=$(mktemp -d)
+walk=$(cd -P "$walk" && pwd -P)
+walk_link=$(mktemp -u)
+ln -s "$walk" "$walk_link"
 mkdir -p "$walk/docker"
 echo '{}' > "$walk/package.json"
 idk=$(printf '9%.0s' {1..64})
 { docker_fixture
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$idk" shop-web nginx '' '' shopw "$walk/docker" '0.0.0.0:8090->80/tcp'
+    "$idk" shop-web nginx '' '' shopw "$walk_link/docker" '0.0.0.0:8090->80/tcp'
 } > "$dps"
 sleep 30 & s_web=$!
 sleep 30 & s_router=$!
@@ -473,6 +480,8 @@ has "a Compose project with no marker falls back to its working directory" \
   "$(proj_row /home/u/projects/shop)" "5433"
 same "a Compose working directory walks up to its marker, where the host process joins it" \
   "$(proj_row "$walk" | awk '{ print $1 }')" 2
+same "and the symlinked path it was given does not get a row of its own" \
+  "$(printf '%s\n' "$proj_out" | grep -c -F "$walk_link")" 0
 same "with Docker off, none of it is claimed" \
   "$(DEVPS_DOCKER=0 DEVPS_DOCKER_PS="$dps" DEVPS_CGROUPS="$cgf" "$DEVPS" projects | grep -c '/home/u/wp/aha')" 0
 
@@ -481,8 +490,9 @@ rejects "kill project refuses a project that runs only in containers" dp kill pr
 kill_err=$(dp kill project /home/u/wp/aha -d 2>&1 > /dev/null)
 has "and names the containers" "$kill_err" "runs in containers (ddev-aha-web)"
 has "and the command that stops them" "$kill_err" "stop it with: ddev stop aha"
-# A mixed project stops its host process and leaves its container alone.
-kill_out=$(dp kill project "$walk" -d)
+# A mixed project stops its host process and leaves its container alone,
+# named here through the symlink, which kill project resolves.
+kill_out=$(dp kill project "$walk_link" -d)
 same "a mixed project stops its host process, never the container's" \
   "$(printf '%s\n' "$kill_out" | awk -v h="$s_host" -v c="$s_walk" '
      $1 == h { host = 1 } $1 == c { cont = 1 } END { print host "" (cont ? "-signalled" : "") }')" 1
@@ -492,7 +502,7 @@ has "including the stop command" "$kill_out" "stop them with: docker compose -p 
 
 kill "$s_web" "$s_router" "$s_run" "$s_shop" "$s_walk" "$s_host" 2>/dev/null || true
 wait "$s_web" "$s_router" "$s_run" "$s_shop" "$s_walk" "$s_host" 2>/dev/null || true
-rm -rf "$walk"; rm -f "$dps" "$cgf"
+rm -rf "$walk"; rm -f "$walk_link" "$dps" "$cgf"
 
 group "project attribution reaches deep working directories"
 # a pnpm store or a monorepo package can sit a dozen levels under its own root;

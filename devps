@@ -1404,9 +1404,12 @@ kill_cmd() {
       [ "${#roots[@]}" -gt 0 ] || die "no processes in group '$target'"
       ;;
     project)
-      local hits distinct cids
+      local hits distinct cids want=$target phys
       docker_ready
-      hits=$(project_pids "$target")
+      # a path is matched as the physical path every root is read back as, so
+      # one given through a symlink - /tmp and /var on a Mac - still names it
+      if [ -d "$want" ] && phys=$(cd -P -- "$want" && pwd -P); then want=$phys; fi
+      hits=$(project_pids "$want")
       [ -n "${hits//[[:space:]]/}" ] || die "no processes for project '$target' (try: $PROG projects)"
       distinct=$(printf '%s\n' "$hits" | cut -f1 | sort -u)
       if [ "$(printf '%s\n' "$distinct" | grep -c .)" -gt 1 ]; then
@@ -2582,9 +2585,22 @@ PROOTLIB='
 # The containers, their published ports and which process is in which, as
 # the D, Q and K streams the project readers join on. Empty without Docker.
 docker_streams() {
-  docker_snap | tagged D
+  docker_snap | physical_roots | tagged D
   docker_ports | tagged Q
   container_pids | tagged K
+}
+
+# Container rows with each project root resolved through symlinks. A cwd is
+# read back as the physical path - readlink on /proc, lsof on a Mac - while a
+# DDEV or Compose label keeps the path as it was given. On a Mac /var and /tmp
+# are links into /private, so without this a host process and the container
+# beside it land on two rows for one project.
+physical_roots() {
+  local id name image kind proj root ports phys
+  while IFS=$'\t' read -r id name image kind proj root ports; do
+    if [ "$root" != - ] && [ -d "$root" ] && phys=$(cd -P -- "$root" && pwd -P); then root=$phys; fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$name" "$image" "$kind" "$proj" "$root" "$ports"
+  done
 }
 
 # Where a process in a container belongs, for the project readers: the
