@@ -119,7 +119,7 @@ your dev server will not bind.
 | `projects` | yes | yes |
 | `--redact` | yes | yes |
 | `doctor` | WSL2 only | not applicable |
-| Containers (Docker, DDEV) | yes, with each container's RAM | ports and projects under Docker Desktop, no per-container RAM |
+| Containers (Docker, DDEV) | native Docker: yes, with each container's RAM; Docker Desktop: ports and projects, no per-container RAM | Docker Desktop: ports and projects, no per-container RAM |
 
 Where a number cannot be read honestly it is reported as absent rather than
 estimated: on macOS the `SWAP` column reads `-` on every row rather than a
