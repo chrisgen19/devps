@@ -34,6 +34,11 @@ ok() {
   if "$@" > /dev/null; then pass "$desc"; else fail "$desc (exit $?)"; fi
 }
 
+# same <description> <got> <want>   - exact match; a miss shows what came back
+same() {
+  if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (got: $(printf '%s' "$2" | tr '\t\n' ':,'))"; fi
+}
+
 # rejects <description> <command...>   - command must fail
 rejects() {
   local desc="$1"; shift
@@ -175,6 +180,96 @@ open(sys.argv[1], "w").write(str(s.getsockname()[1])); time.sleep(20)' "$portfil
   kill "$lpid" 2>/dev/null || true
   wait "$lpid" 2>/dev/null || true
   rm -f "$portfile"
+fi
+
+group "docker: containers, their ports and processes"
+# Drive the real docker section out of the script against captured docker ps
+# rows: a DDEV project, DDEV's shared router and ssh agent, a compose project
+# and a bare docker run, plus the kind of line a failing daemon prints.
+# shellcheck disable=SC2034  # read by container_pids, which arrives by eval
+case "$PLAT" in Darwin) DP_PLATFORM=darwin ;; *) DP_PLATFORM=linux ;; esac
+eval "$(sed -n '/^# -* docker ----$/,/^# -* psi ----$/p' "$DEVPS")"
+idw=$(printf 'a%.0s' {1..64}); idr=$(printf 'b%.0s' {1..64})
+ids=$(printf 'c%.0s' {1..64}); idc=$(printf 'd%.0s' {1..64})
+idn=$(printf 'e%.0s' {1..64})
+dps=$(mktemp)
+{
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$idw" ddev-aha-web ddev/ddev-webserver:v1.25.1 aha /home/u/wp/aha ddev-aha \
+      /home/u/wp/aha/.ddev '127.0.0.1:32854->80/tcp, 127.0.0.1:32855->443/tcp' \
+    "$idr" ddev-router ddev/ddev-traefik-router:v1.25.1 '' '' ddev-router \
+      /home/u/.ddev '127.0.0.1:80->80/tcp, 127.0.0.1:8025-8026->8025-8026/tcp' \
+    "$ids" ddev-ssh-agent ddev/ddev-ssh-agent:v1.25.1 '' '' ddev-ssh-agent \
+      /home/u/.ddev '' \
+    "$idc" shop-db-1 postgres:17 '' '' shop \
+      /home/u/projects/shop '0.0.0.0:5433->5432/tcp, :::5433->5432/tcp' \
+    "$idn" scratch redis:7 '' '' '' \
+      '' '6379/tcp, 0.0.0.0:9000->9000/udp'
+  echo 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock'
+} > "$dps"
+
+rows=$(DEVPS_DOCKER_PS="$dps" docker_rows)
+same "labels decide each container's kind, project and root" \
+  "$(printf '%s\n' "$rows" | cut -f2,4-6)" \
+  "$(printf '%s\t%s\t%s\t%s\n' \
+      ddev-aha-web   ddev        aha            /home/u/wp/aha \
+      ddev-router    ddev-shared ddev-router    /home/u/.ddev \
+      ddev-ssh-agent ddev-shared ddev-ssh-agent /home/u/.ddev \
+      shop-db-1      compose     shop           /home/u/projects/shop \
+      scratch        run         -              -)"
+# bash read collapses a run of tabs, so an empty field would shift the rest
+if printf '%s\n' "$rows" | awk -F'\t' '
+     NF != 7 { bad = 1 } { for (i = 1; i <= NF; i++) if ($i == "") bad = 1 }
+     END { exit bad }'; then
+  pass "every row has seven fields and none of them is empty"
+else
+  fail "every row has seven fields and none of them is empty"
+fi
+same "ranges expand, IPv4 and IPv6 collapse, unpublished and udp are skipped" \
+  "$(DEVPS_DOCKER_PS="$dps" docker_ports | sort -n)" \
+  "$(printf '%s\t%s\t%s\n' \
+      80 "$idr" 80/tcp   5433 "$idc" 5432/tcp  8025 "$idr" 8025/tcp \
+      8026 "$idr" 8026/tcp  32854 "$idw" 80/tcp  32855 "$idw" 443/tcp)"
+
+# cgroup v1 repeats the path once per controller; both drivers' spellings
+cgf=$(mktemp)
+printf '%s\n' "/proc/4242/cgroup:docker-$idw" \
+  "/proc/4343/cgroup:/docker/$idc" "/proc/4343/cgroup:/docker/$idc" > "$cgf"
+same "both cgroup drivers map a process to its container, once each" \
+  "$(DEVPS_CGROUPS="$cgf" container_pids)" \
+  "$(printf '%s\t%s\n' 4242 "$idw" 4343 "$idc")"
+
+same "DEVPS_DOCKER=0 turns every reader off" \
+  "$(DEVPS_DOCKER=0 DEVPS_DOCKER_PS="$dps" docker_rows
+     DEVPS_DOCKER=0 DEVPS_CGROUPS="$cgf" container_pids)" ""
+same "no docker on PATH is no containers, not an error" \
+  "$(PATH=/nonexistent docker_rows; echo "exit=$?")" "exit=0"
+# last, because it empties the fixture to prove nothing re-reads it
+if ( export DEVPS_DOCKER_PS="$dps"; docker_load; : > "$dps"
+     [ "$(docker_snap | awk 'END { print NR }')" = 5 ] ); then
+  pass "docker_load asks once and docker_snap answers from that"
+else
+  fail "docker_load asks once and docker_snap answers from that"
+fi
+rm -f "$dps" "$cgf"
+
+# The fixture pins docker's format; this proves the real daemon still prints
+# it. Only a daemon on this kernel puts container processes where the cgroup
+# scan can see them, so that half needs dockerd in this process list.
+if ! command -v docker > /dev/null || ! docker info > /dev/null 2>&1; then
+  skip "live docker (no reachable daemon)"
+elif [ "$(docker ps -q | awk 'END { print NR }')" = 0 ]; then
+  skip "live docker (no containers running)"
+else
+  same "docker_rows reads every running container" \
+    "$(docker_rows | awk 'END { print NR }')" "$(docker ps -q | awk 'END { print NR }')"
+  if [ "$PLAT" = Linux ] && pgrep -x dockerd > /dev/null; then
+    same "every running container's processes are found through cgroups" \
+      "$({ container_pids | sed 's/^/P\t/'; docker_rows | sed 's/^/D\t/'; } | awk -F'\t' '
+          $1 == "P" { seen[$3] = 1; next } !($2 in seen) { print $3 }')" ""
+  else
+    skip "container processes (the daemon is not on this kernel)"
+  fi
 fi
 
 group "project attribution reaches deep working directories"

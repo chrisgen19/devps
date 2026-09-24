@@ -592,6 +592,131 @@ group_legend() {
   printf '%s' "$out"
 }
 
+# --------------------------------------------------------------- docker ----
+# Containers: which one publishes a port, which project it serves, and which
+# processes run inside it. Docker is optional. Without the CLI, with the daemon
+# down or unreachable, or with DEVPS_DOCKER=0, every reader here comes back
+# empty and nothing downstream changes.
+#
+# Two sources, neither needing root. docker ps names each container, the host
+# ports it publishes and the labels saying which project it belongs to. The
+# kernel says which container a process is in: /proc/<pid>/cgroup is world
+# readable, and Docker names each container's cgroup after its id.
+
+# docker turns the \t escapes into tabs itself. Ports goes last because it is
+# the one field with separators of its own.
+DOCKER_PS_FMT='{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Label "com.ddev.site-name"}}\t{{.Label "com.ddev.approot"}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.project.working_dir"}}\t{{.Ports}}'
+
+# One raw docker ps row in, one row of the contract every consumer reads out:
+#   id  name  image  kind  project  root  ports
+# kind says what started the container, and so how it should be stopped:
+#   ddev         a DDEV project's own container; root is its approot
+#   ddev-shared  the router and ssh agent that serve every DDEV project; they
+#                carry no approot and are composed from ~/.ddev
+#   compose      a docker compose project; root is its working directory
+#   run          a bare docker run, with no project and no root
+# An empty field is written as -, because bash read collapses a run of tabs
+# and would shift every field after an empty one.
+# shellcheck disable=SC2016  # an awk program: $1 and friends are its fields
+AWKDOCKER='
+  function dash(s) { return s == "" ? "-" : s }
+  NF < 8 || $1 !~ /^[0-9a-f]+$/ { next }
+  {
+    site = $4; approot = $5; cproj = $6; wdir = $7
+    if (approot != "")           { kind = "ddev";        proj = site;  root = approot }
+    else if (wdir ~ /\/\.ddev$/) { kind = "ddev-shared"; proj = cproj; root = wdir }
+    else if (cproj != "")        { kind = "compose";     proj = cproj; root = wdir }
+    else                         { kind = "run";         proj = "";    root = "" }
+    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, kind, dash(proj), dash(root), dash($8)
+  }
+'
+
+# The published host ports, one "port<TAB>id<TAB>container-port/proto" line
+# each, from the rows above. docker ps writes them as
+#   127.0.0.1:80->80/tcp, :::80->80/tcp, 0.0.0.0:8025-8026->8025-8026/tcp
+# so a range expands to a line per port, the IPv4 and IPv6 halves of one
+# binding collapse into one line, and an exposed but unpublished "3306/tcp" has
+# no host side and is skipped. TCP only, to match listeners.
+# shellcheck disable=SC2016  # an awk program: $1 and friends are its fields
+AWKDOCKERPORTS='
+  $7 != "-" {
+    n = split($7, e, /, */)
+    for (i = 1; i <= n; i++) {
+      at = index(e[i], "->")
+      if (!at) continue
+      host = substr(e[i], 1, at - 1); cont = substr(e[i], at + 2)
+      proto = cont; sub(/^[^\/]*\//, "", proto); sub(/\/.*$/, "", cont)
+      if (proto != "tcp") continue
+      sub(/^.*:/, "", host)
+      split(host, r, "-"); lo = r[1] + 0; hi = (2 in r) ? r[2] + 0 : lo
+      split(cont, r, "-"); c = r[1] + 0
+      for (p = lo; p > 0 && p <= hi; p++)
+        if (!(($1, p) in seen)) {
+          seen[$1, p] = 1
+          printf "%d\t%s\t%d/%s\n", p, $1, c + p - lo, proto
+        }
+    }
+  }
+'
+
+# "pid<TAB>id" from grep -H lines like /proc/26894/cgroup:docker-<id>. The
+# systemd cgroup driver names the group docker-<id>.scope and cgroupfs names it
+# /docker/<id>, both with the full id that docker ps --no-trunc prints. cgroup
+# v1 repeats the path once per controller, so each pair is printed once.
+# shellcheck disable=SC2016  # an awk program: $0 is its record
+AWKCGROUP='
+  { pid = $0; sub(/^\/proc\//, "", pid); sub(/\/.*$/, "", pid)
+    id = $0; sub(/^.*[-\/]/, "", id)
+    if (!((pid, id) in seen)) { seen[pid, id] = 1; printf "%s\t%s\n", pid, id } }
+'
+
+# Container rows straight from the daemon. DEVPS_DOCKER_PS points this at a
+# file of raw docker ps rows instead, so the parsing is testable on a runner
+# with no daemon. A stopped daemon fails fast on its own; a hung one is given
+# two seconds where timeout(1) exists, rather than hanging the whole report.
+docker_rows() {
+  [ "${DEVPS_DOCKER:-1}" = 0 ] && return 0
+  if [ -n "${DEVPS_DOCKER_PS:-}" ]; then
+    awk -F'\t' "$AWKDOCKER" "$DEVPS_DOCKER_PS"
+    return
+  fi
+  command -v docker > /dev/null || return 0
+  if command -v timeout > /dev/null; then
+    timeout 2 docker ps --no-trunc --format "$DOCKER_PS_FMT" 2> /dev/null
+  else
+    docker ps --no-trunc --format "$DOCKER_PS_FMT" 2> /dev/null
+  fi | awk -F'\t' "$AWKDOCKER"
+}
+
+# docker ps costs a tenth of a second, so a command asks it once: docker_load
+# in the command's own shell, then every reader goes through docker_snap. A
+# reader called without a load, or from a subshell of one, asks the daemon.
+DOCKER_SNAP=""
+DOCKER_LOADED=0
+docker_load() { DOCKER_SNAP=$(docker_rows); DOCKER_LOADED=1; }
+docker_snap() {
+  if [ "$DOCKER_LOADED" != 1 ]; then docker_rows; return; fi
+  if [ -n "$DOCKER_SNAP" ]; then printf '%s\n' "$DOCKER_SNAP"; fi
+}
+
+docker_ports() { docker_snap | awk -F'\t' "$AWKDOCKERPORTS"; }
+
+# Which container each process is in, as "pid<TAB>id". Only a daemon running
+# on this kernel puts its containers' processes where this can see them:
+# Docker Desktop runs them in a VM, on macOS and on WSL alike, so there this
+# finds nothing and the port mapping above is all there is. Processes that exit
+# between the glob and the read are why grep's complaints are dropped.
+# DEVPS_CGROUPS points it at a file of those grep lines instead.
+container_pids_linux() {
+  grep -H -o -E 'docker[-/][0-9a-f]{64}' /proc/[0-9]*/cgroup 2> /dev/null
+}
+container_pids_darwin() { :; }
+container_pids() {
+  [ "${DEVPS_DOCKER:-1}" = 0 ] && return 0
+  if [ -n "${DEVPS_CGROUPS:-}" ]; then cat "$DEVPS_CGROUPS"; else "container_pids_$DP_PLATFORM"; fi |
+    awk "$AWKCGROUP"
+}
+
 # ------------------------------------------------------------------- psi ----
 # Pressure Stall Information: the share of the last 10s in which tasks were
 # stalled waiting for a resource. "some" means at least one task was blocked,
