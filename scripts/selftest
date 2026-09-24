@@ -308,7 +308,7 @@ else
     "$(docker_rows | awk 'END { print NR }')" "$(docker ps -q | awk 'END { print NR }')"
   if [ "$PLAT" = Linux ] && pgrep -x dockerd > /dev/null; then
     same "every running container's processes are found through cgroups" \
-      "$({ container_pids | sed 's/^/P\t/'; docker_rows | sed 's/^/D\t/'; } | awk -F'\t' '
+      "$({ container_pids | awk '{ print "P\t" $0 }'; docker_rows | awk '{ print "D\t" $0 }'; } | awk -F'\t' '
           $1 == "P" { seen[$3] = 1; next } !($2 in seen) { print $3 }')" ""
   else
     skip "container processes (the daemon is not on this kernel)"
@@ -393,6 +393,40 @@ if [ "$(grep -c 'dash_do_kill port "[$]{VIEW_PORTS\[[$]DASH_SEL\]}"' "$DEVPS")" 
 else
   fail "the dashboard's x and X both stop a port through kill port"
 fi
+
+# Processes inside a container keep their own group, and the process tables
+# say which container: the throwaway sleep plays a process in ddev-aha-web.
+has "a process inside a container carries its name in the process tables" \
+  "$(dk group other | awk -v p="$inner_pid" '$1 == p')" "[ddev-aha-web] sleep 30"
+same "and with Docker off it does not" \
+  "$(DEVPS_DOCKER=0 DEVPS_DOCKER_PS="$dps" DEVPS_CGROUPS="$cgf" "$DEVPS" group other |
+     awk -v p="$inner_pid" '$1 == p' | grep -c '\[ddev-aha-web\]')" 0
+eval "$(sed -n "/^AWKLIB='/,/^'$/p" "$DEVPS")"
+same "ctag names the container for its own pids and nothing else" \
+  "$(awk -v CMAP="4242=web-a|4343=web-b|" "$AWKLIB"'
+       BEGIN { printf "%s|%s|%s", ctag(4242), ctag(4343), ctag(1) }')" "[web-a] |[web-b] |"
+# given the room it may take, a long name is cut to exactly that, a short one
+# is left alone, and with no room for a name there is no tag
+same "ctag cuts a long name to its room, and gives up when there is none" \
+  "$(awk -v CMAP="4242=ddev-accessindigenous-website-web|4343=web-a|" "$AWKLIB"'
+       BEGIN { t = ctag(4242, 20); printf "%s(%d)|%s|%s", t, length(t), ctag(4343, 20), ctag(4242, 5) }')" \
+  "[ddev-accessind...] (20)|[web-a] |"
+
+# The dashboard paints rows as they are, so one wider than the terminal wraps
+# into the next and corrupts it. Drive its row formatter at 80 columns with a
+# long container name: the row has to leave the two columns the pointer takes,
+# and the tag has to be cut rather than dropped.
+eval "$(sed -n '/^dash_fmt_proc()/,/^}/p' "$DEVPS")"
+# shellcheck disable=SC2034  # all read by dash_fmt_proc, which arrives by eval
+dash_row=$(
+  TCOLS=80 C_DIM='' C_0='' C_R='' C_Y='' C_G='' C_NEW='' C_C='' GCOLS_STR='' BAR_EMPTY=.
+  BLK=('#' '#' '#' '#' '#' '#' '#' '#')
+  DASH_CMAP="4242=ddev-accessindigenous-website-web|"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    4242 1677721 0 17820 0.0 dev-server 'next-server (v15.5.12)' 0 1 0 0.0 0 0 | dash_fmt_proc)
+same "a long container name keeps a dashboard row inside 80 columns" \
+  "$([ "${#dash_row}" -le 78 ] && echo fits || echo "${#dash_row} columns")" fits
+has "and the tag is cut to fit, not dropped" "$dash_row" "[ddev-acc...] next-"
 
 same "each kind of container gets its own clean stop" \
   "$(docker_stop_hint ddev aha x; echo; docker_stop_hint ddev-shared - x; echo
@@ -588,6 +622,39 @@ expect_group other      '/opt/tool --name com.apple.fake'
 expect_group other      '/home/alice/cron --user'
 expect_group other      '/usr/local/bin/sshd-wrapper'
 expect_group other      '/home/bob/launchd'
+# the Docker runtime, as docker-ce, a distro package, Docker Desktop on a Mac
+# and on WSL, and rootless Docker each run it
+expect_group container  '/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock'
+expect_group container  '/usr/bin/containerd'
+expect_group container  '/usr/bin/containerd-shim-runc-v2 -namespace moby -id 34d84fb0cbc8 -address /run/containerd/containerd.sock'
+expect_group container  '/usr/bin/docker-proxy -proto tcp -host-ip 127.0.0.1 -host-port 80 -container-ip 172.18.0.5'
+expect_group container  'rootlesskit --state-dir=/run/user/1000/dockerd-rootless --net=slirp4netns dockerd'
+expect_group container  '/Applications/Docker.app/Contents/MacOS/com.docker.backend'
+expect_group container  '/Applications/Docker.app/Contents/MacOS/Docker Desktop.app/Contents/MacOS/Docker Desktop'
+expect_group container  '/mnt/wsl/docker-desktop/docker-desktop-user-distro proxy --distro-name Ubuntu'
+# these two sit under system prefixes, so the container branch has to run first
+expect_group container  '/sbin/docker-init -- /usr/local/bin/monitor-traefik-stderr.sh'
+expect_group container  '/usr/sbin/dockerd -H fd://'
+# an init runs its container command as arguments, which must not win either
+expect_group container  '/sbin/docker-init -- npx @modelcontextprotocol/server-postgres'
+# a process inside a container keeps its own group
+expect_group database   '/usr/sbin/mariadbd --user=mysql'
+# and an argument naming the runtime does not make something Docker
+expect_group node       'node app.js --runtime=dockerd'
+expect_group other      '/home/u/bin/tool --exec /usr/bin/containerd'
+expect_group other      'vim /etc/docker/daemon.json'
+expect_group mcp        'docker mcp gateway run'
+# Docker Desktop ships the CLI and its plugins beside its runtime, and the CLI
+# runs a plugin under its full path: the process doing the work of "docker mcp
+# gateway run" is the plugin, inside the bundle. Clients, not the runtime.
+expect_group mcp        '/Applications/Docker.app/Contents/Resources/bin/docker mcp gateway run'
+expect_group mcp        '/Applications/Docker.app/Contents/Resources/cli-plugins/docker-mcp mcp gateway run'
+expect_group other      '/Applications/Docker.app/Contents/Resources/cli-plugins/docker-compose compose up'
+expect_group mcp        '/mnt/wsl/docker-desktop/cli-tools/usr/local/lib/docker/cli-plugins/docker-mcp mcp gateway run'
+expect_group other      '/mnt/wsl/docker-desktop/cli-tools/usr/bin/docker compose up'
+expect_group mcp        '/usr/libexec/docker/cli-plugins/docker-mcp mcp gateway run'
+# while the Docker Desktop app itself, helpers included, is still runtime
+expect_group container  '/Applications/Docker.app/Contents/MacOS/Docker Desktop.app/Contents/Frameworks/Docker Desktop Helper (Renderer).app/Contents/MacOS/Docker Desktop Helper (Renderer) --type=renderer'
 
 group "idle classification"
 # ppid 1 plus a hand-started group is an orphan; system daemons at ppid 1 are
@@ -709,6 +776,16 @@ if killable_group mcp && killable_group dev-server; then
 else
   fail "killable_group allows the ordinary groups"
 fi
+# the Docker runtime as a set is every container at once
+if killable_group container; then
+  fail "killable_group rejects container"
+else
+  pass "killable_group rejects container"
+fi
+# the words, not the exit: a runner with no Docker has no container rows, so
+# an empty match would fail the command too
+has "kill group container is refused by the guard, with the Docker way out" \
+  "$("$DEVPS" kill group container -d 2>&1 > /dev/null)" "Stop containers through Docker"
 
 # -d as well, so a regression here fails the test rather than the runner
 guard_err=$(mktemp)
