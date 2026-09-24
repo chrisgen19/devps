@@ -255,6 +255,27 @@ same "DEVPS_DOCKER=0 turns every reader off" \
      DEVPS_DOCKER=0 DEVPS_CGROUPS="$cgf" container_pids)" ""
 same "no docker on PATH is no containers, not an error" \
   "$(PATH=/nonexistent docker_rows; echo "exit=$?")" "exit=0"
+# A daemon on another machine publishes ports over there. Five rows means the
+# fixture was read; none means the daemon was judged remote and skipped.
+rows_via() { DOCKER_HOST=$1 DEVPS_DOCKER_PS="$dps" docker_rows | awk 'END { print NR }'; }
+same "an ssh daemon's containers are not this machine's" "$(rows_via ssh://deploy@build.example.com)" 0
+same "nor are a tcp daemon's on another host" "$(rows_via tcp://10.0.0.5:2376)" 0
+same "a local socket and loopback tcp still count" \
+  "$(rows_via unix:///var/run/docker.sock; rows_via tcp://127.0.0.1:2375; rows_via tcp://localhost:2375)" \
+  "$(printf '5\n5\n5')"
+# a named context is looked up; a stand-in docker answers for the endpoint
+fake_bin=$(mktemp -d)
+# shellcheck disable=SC2016  # written into the stand-in, which expands it
+printf '#!/bin/sh\necho "$FAKE_ENDPOINT"\n' > "$fake_bin/docker"
+chmod +x "$fake_bin/docker"
+ctx_rows() {
+  ( export PATH="$fake_bin:$PATH" DOCKER_CONTEXT=prod FAKE_ENDPOINT=$1
+    unset DOCKER_HOST; DEVPS_DOCKER_PS="$dps" docker_rows ) | awk 'END { print NR }'
+}
+same "a context pointing at another host is remote" "$(ctx_rows ssh://deploy@build.example.com)" 0
+same "a context on a local socket is not" "$(ctx_rows unix:///run/user/1000/docker.sock)" 5
+rm -rf "$fake_bin"
+
 # last, because it empties the fixture to prove nothing re-reads it
 if ( export DEVPS_DOCKER_PS="$dps"; docker_load; : > "$dps"
      [ "$(docker_snap | awk 'END { print NR }')" = 5 ] ); then

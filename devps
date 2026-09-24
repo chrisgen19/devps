@@ -670,12 +670,32 @@ AWKCGROUP='
     if (!((pid, id) in seen)) { seen[pid, id] = 1; printf "%s\t%s\n", pid, id } }
 '
 
+# Is the daemon docker ps would ask running on this machine. A context or
+# DOCKER_HOST can point the CLI at another host, whose containers publish
+# ports over there: matched by number against this machine's listeners they
+# would label the wrong sockets, and over ssh every command would pay for the
+# round trip. With no DOCKER_HOST and no context chosen the CLI uses the local
+# default socket, so the common case is decided without asking anything.
+docker_is_local() {
+  local host=${DOCKER_HOST:-} cfg=${DOCKER_CONFIG:-$HOME/.docker}/config.json
+  if [ -z "$host" ] && { [ -n "${DOCKER_CONTEXT:-}" ] || grep -q '"currentContext"' "$cfg" 2> /dev/null; }; then
+    host=$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2> /dev/null)
+  fi
+  case "$host" in
+    ""|unix://*|npipe://*) return 0 ;;
+    tcp://localhost|tcp://localhost[:/]*|tcp://127.*|tcp://\[::1\]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Container rows straight from the daemon. DEVPS_DOCKER_PS points this at a
 # file of raw docker ps rows instead, so the parsing is testable on a runner
 # with no daemon. A stopped daemon fails fast on its own; a hung one is given
 # two seconds where timeout(1) exists, rather than hanging the whole report.
+# A daemon on another machine is not asked at all.
 docker_rows() {
   [ "${DEVPS_DOCKER:-1}" = 0 ] && return 0
+  docker_is_local || return 0
   if [ -n "${DEVPS_DOCKER_PS:-}" ]; then
     awk -F'\t' "$AWKDOCKER" "$DEVPS_DOCKER_PS"
     return
