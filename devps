@@ -34,6 +34,7 @@ group_palette() {
     GCOL[database]=$'\033[38;5;221m'   # gold
     GCOL[webserver]=$'\033[38;5;79m'   # teal
     GCOL[node]=$'\033[38;5;114m'       # green
+    GCOL[container]=$'\033[38;5;175m'  # pink - the one hue left unused
     GCOL[system]=$'\033[38;5;240m'     # dark grey - quieter than other
     GCOL[other]=$'\033[38;5;244m'      # grey
   elif [ "$UI_COLOR" -eq 1 ]; then
@@ -41,6 +42,7 @@ group_palette() {
     GCOL[dev-server]=$'\033[36m'  GCOL[browser]=$'\033[34m'
     GCOL[editor]=$'\033[35m'   GCOL[database]=$'\033[1;33m'
     GCOL[webserver]=$'\033[1;36m' GCOL[node]=$'\033[32m'
+    GCOL[container]=$'\033[1;35m'
     GCOL[system]=$'\033[37m'  GCOL[other]=$'\033[2m'
   fi
   # flattened for awk: group=escape|group=escape|...
@@ -326,7 +328,7 @@ function shorten(a, w,   s, h) {
 }
 '
 
-DP_GROUPS="mcp ai-agent dev-server browser editor database webserver node system other"
+DP_GROUPS="mcp ai-agent dev-server browser editor database webserver node container system other"
 
 # The group classifier, shared by every snapshot implementation. A process must
 # land in the same group whichever kernel reported it, or the group table means
@@ -351,8 +353,21 @@ function secs(t,   d, p, n, v, i) {
 '
 
 AWKCAT='
-function cat(a,   l, exe) {
+function cat(a,   l, exe, base) {
   l = tolower(a)
+  exe = l; sub(/[ \t].*/, "", exe)
+  base = exe; sub(/^.*\//, "", base)
+  # The Docker runtime: the daemons, the shim and init every container runs
+  # under, the forwarders behind published ports, rootless Docker included,
+  # and Docker Desktop, whose app bundle on a Mac and distro on WSL hold the
+  # rest. First, because /sbin/docker-init and a distro /usr/sbin/dockerd sit
+  # under system prefixes, and the arguments of an init are the command of its
+  # container, which can say anything. As for system, only the executable
+  # decides: "node app.js --runtime=dockerd" is not Docker. The processes
+  # inside a container are not listed here and keep their own group, so a
+  # containerised mysqld is still a database.
+  if (base ~ /^(dockerd|containerd|containerd-shim.*|docker-proxy|docker-init|buildkitd|rootlesskit|slirp4netns|pasta(\.avx2)?|com\.docker\..+)$/ ||
+      exe ~ /^\/applications\/docker\.app\/|^\/mnt\/wsl\/docker-desktop\//) return "container"
   # the official packages spell it out: "@modelcontextprotocol/server-postgres"
   # contains no "mcp", so it used to fall through to the postgres branch and be
   # counted as a database. Every other spelling in the wild - mcp-server-x,
@@ -375,7 +390,6 @@ function cat(a,   l, exe) {
   # names is unbounded, the directories they live in are not.
   # Only the executable decides this, never an argument: "/opt/tool --name
   # com.apple.fake" is not a system process, and "/home/alice/cron" is not cron.
-  exe = l; sub(/[ \t].*/, "", exe)
   if (exe ~ /^\/system\/|^\/library\/apple\/|^\/usr\/libexec\/|^\/usr\/sbin\/|^\/usr\/lib\/|^\/sbin\/|^\/lib\//) return "system"
   if (exe ~ /^com\.apple\./) return "system"
   # a bare daemon name, with no path at all - a path-qualified one had to match
@@ -999,9 +1013,23 @@ valid_group() { case " $DP_GROUPS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
 # pid 1 and the caller's own ancestors and nothing else, so "kill group system"
 # would SIGTERM every daemon the OS is running - several hundred of them on a
 # Mac - and take the session with it. Reading them is useful; stopping them as
-# a set never is.
-DP_UNKILLABLE="system"
+# a set never is. container is the same shape: signalling Docker's runtime as
+# a set stops every container at once, and under Docker Desktop, Docker.
+DP_UNKILLABLE="system container"
 killable_group() { case " $DP_UNKILLABLE " in *" $1 "*) return 1 ;; *) return 0 ;; esac; }
+
+# why a group in DP_UNKILLABLE is refused, and what to do instead
+unkillable_why() {
+  case "$1" in
+    container) printf '%s\n       %s\n       %s' \
+      "That is Docker's runtime. Signalled as a set it stops every container," \
+      "and under Docker Desktop, Docker itself. Stop containers through Docker:" \
+      "docker stop <name>, or ddev stop <project>. If you really mean one process:" ;;
+    *) printf '%s\n       %s' \
+      "Those are the operating system's own processes, not yours, and nothing" \
+      "here is safe to signal as a set. If you really mean one of them, name it:" ;;
+  esac
+}
 
 # ----------------------------------------------------------------- header ----
 header() {
@@ -1289,8 +1317,7 @@ kill_cmd() {
     group)
       valid_group "$target" || die "unknown group '$target' (valid: $DP_GROUPS)"
       killable_group "$target" || die "refusing to stop the '$target' group.
-       Those are the operating system's own processes, not yours, and nothing
-       here is safe to signal as a set. If you really mean one of them, name it:
+       $(unkillable_why "$target")
        $PROG kill pid <n>"
       mapfile -t roots < <(snapshot | awk -F'\t' -v g="$target" '$6 == g { print $1 }')
       [ "${#roots[@]}" -gt 0 ] || die "no processes in group '$target'"

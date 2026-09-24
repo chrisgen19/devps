@@ -588,6 +588,28 @@ expect_group other      '/opt/tool --name com.apple.fake'
 expect_group other      '/home/alice/cron --user'
 expect_group other      '/usr/local/bin/sshd-wrapper'
 expect_group other      '/home/bob/launchd'
+# the Docker runtime, as docker-ce, a distro package, Docker Desktop on a Mac
+# and on WSL, and rootless Docker each run it
+expect_group container  '/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock'
+expect_group container  '/usr/bin/containerd'
+expect_group container  '/usr/bin/containerd-shim-runc-v2 -namespace moby -id 34d84fb0cbc8 -address /run/containerd/containerd.sock'
+expect_group container  '/usr/bin/docker-proxy -proto tcp -host-ip 127.0.0.1 -host-port 80 -container-ip 172.18.0.5'
+expect_group container  'rootlesskit --state-dir=/run/user/1000/dockerd-rootless --net=slirp4netns dockerd'
+expect_group container  '/Applications/Docker.app/Contents/MacOS/com.docker.backend'
+expect_group container  '/Applications/Docker.app/Contents/MacOS/Docker Desktop.app/Contents/MacOS/Docker Desktop'
+expect_group container  '/mnt/wsl/docker-desktop/docker-desktop-user-distro proxy --distro-name Ubuntu'
+# these two sit under system prefixes, so the container branch has to run first
+expect_group container  '/sbin/docker-init -- /usr/local/bin/monitor-traefik-stderr.sh'
+expect_group container  '/usr/sbin/dockerd -H fd://'
+# an init runs its container command as arguments, which must not win either
+expect_group container  '/sbin/docker-init -- npx @modelcontextprotocol/server-postgres'
+# a process inside a container keeps its own group
+expect_group database   '/usr/sbin/mariadbd --user=mysql'
+# and an argument naming the runtime does not make something Docker
+expect_group node       'node app.js --runtime=dockerd'
+expect_group other      '/home/u/bin/tool --exec /usr/bin/containerd'
+expect_group other      'vim /etc/docker/daemon.json'
+expect_group mcp        'docker mcp gateway run'
 
 group "idle classification"
 # ppid 1 plus a hand-started group is an orphan; system daemons at ppid 1 are
@@ -709,6 +731,16 @@ if killable_group mcp && killable_group dev-server; then
 else
   fail "killable_group allows the ordinary groups"
 fi
+# the Docker runtime as a set is every container at once
+if killable_group container; then
+  fail "killable_group rejects container"
+else
+  pass "killable_group rejects container"
+fi
+# the words, not the exit: a runner with no Docker has no container rows, so
+# an empty match would fail the command too
+has "kill group container is refused by the guard, with the Docker way out" \
+  "$("$DEVPS" kill group container -d 2>&1 > /dev/null)" "Stop containers through Docker"
 
 # -d as well, so a regression here fails the test rather than the runner
 guard_err=$(mktemp)
