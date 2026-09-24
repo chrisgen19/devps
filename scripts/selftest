@@ -644,6 +644,17 @@ expect_group node       'node app.js --runtime=dockerd'
 expect_group other      '/home/u/bin/tool --exec /usr/bin/containerd'
 expect_group other      'vim /etc/docker/daemon.json'
 expect_group mcp        'docker mcp gateway run'
+# Docker Desktop ships the CLI and its plugins beside its runtime, and the CLI
+# runs a plugin under its full path: the process doing the work of "docker mcp
+# gateway run" is the plugin, inside the bundle. Clients, not the runtime.
+expect_group mcp        '/Applications/Docker.app/Contents/Resources/bin/docker mcp gateway run'
+expect_group mcp        '/Applications/Docker.app/Contents/Resources/cli-plugins/docker-mcp mcp gateway run'
+expect_group other      '/Applications/Docker.app/Contents/Resources/cli-plugins/docker-compose compose up'
+expect_group mcp        '/mnt/wsl/docker-desktop/cli-tools/usr/local/lib/docker/cli-plugins/docker-mcp mcp gateway run'
+expect_group other      '/mnt/wsl/docker-desktop/cli-tools/usr/bin/docker compose up'
+expect_group mcp        '/usr/libexec/docker/cli-plugins/docker-mcp mcp gateway run'
+# while the Docker Desktop app itself, helpers included, is still runtime
+expect_group container  '/Applications/Docker.app/Contents/MacOS/Docker Desktop.app/Contents/Frameworks/Docker Desktop Helper (Renderer).app/Contents/MacOS/Docker Desktop Helper (Renderer) --type=renderer'
 
 group "idle classification"
 # ppid 1 plus a hand-started group is an orphan; system daemons at ppid 1 are

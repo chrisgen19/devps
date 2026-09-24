@@ -379,15 +379,21 @@ function cat(a,   l, exe, base) {
   base = exe; sub(/^.*\//, "", base)
   # The Docker runtime: the daemons, the shim and init every container runs
   # under, the forwarders behind published ports, rootless Docker included,
-  # and Docker Desktop, whose app bundle on a Mac and distro on WSL hold the
-  # rest. First, because /sbin/docker-init and a distro /usr/sbin/dockerd sit
-  # under system prefixes, and the arguments of an init are the command of its
+  # and Docker Desktop: the executables of its app bundle on a Mac, which sit
+  # in Contents/MacOS, and the distro it mounts on WSL. Not the CLI and its
+  # plugins, which ship alongside - Contents/Resources on a Mac, cli-tools on
+  # WSL - and are clients. The CLI runs a plugin under its full path, so
+  # "docker mcp gateway run" is a docker-mcp process inside the bundle, and it
+  # is an MCP server, not Docker.
+  # First, because /sbin/docker-init and a distro /usr/sbin/dockerd sit under
+  # system prefixes, and the arguments of an init are the command of its
   # container, which can say anything. As for system, only the executable
   # decides: "node app.js --runtime=dockerd" is not Docker. The processes
   # inside a container are not listed here and keep their own group, so a
   # containerised mysqld is still a database.
   if (base ~ /^(dockerd|containerd|containerd-shim.*|docker-proxy|docker-init|buildkitd|rootlesskit|slirp4netns|pasta(\.avx2)?|com\.docker\..+)$/ ||
-      exe ~ /^\/applications\/docker\.app\/|^\/mnt\/wsl\/docker-desktop\//) return "container"
+      exe ~ /^\/applications\/docker\.app\/contents\/macos\// ||
+      (exe ~ /^\/mnt\/wsl\/docker-desktop\// && exe !~ /\/cli-tools\//)) return "container"
   # the official packages spell it out: "@modelcontextprotocol/server-postgres"
   # contains no "mcp", so it used to fall through to the postgres branch and be
   # counted as a database. Every other spelling in the wild - mcp-server-x,
