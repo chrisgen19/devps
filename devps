@@ -841,6 +841,37 @@ docker_port_labels() {
       }'
 }
 
+# The names of a set of containers and the commands that stop them: the names
+# comma separated on the first line, then one line per distinct command. A
+# DDEV project's web and db containers stop with the one ddev stop, so it is
+# given once, not once per container.
+docker_stops() {  # <comma separated ids>
+  local id name kind proj names="" hint
+  local -A seen=()
+  local -a hints=()
+  for id in ${1//,/ }; do
+    IFS=$'\t' read -r _ name _ kind proj _ < <(docker_snap | awk -F'\t' -v id="$id" '$1 == id')
+    names+="${names:+, }$name"
+    hint=$(docker_stop_hint "$kind" "$proj" "$name")
+    if [ -z "${seen[$hint]:-}" ]; then seen[$hint]=1; hints+=("$hint"); fi
+  done
+  printf '%s\n' "$names" ${hints[@]+"${hints[@]}"}
+}
+
+# Why kill project will not touch a project that runs only in containers
+docker_project_refusal() {  # <project root> <comma separated ids>
+  local tilde='~' root h
+  local -a s=()
+  root=${1/#$HOME\//$tilde/}
+  mapfile -t s < <(docker_stops "$2")
+  printf '%s runs in containers (%s) - %s does not signal container processes.' "$root" "${s[0]}" "$PROG"
+  if [ "${#s[@]}" -eq 2 ]; then
+    printf '\n       stop it with: %s' "${s[1]}"
+  else
+    for h in "${s[@]:1}"; do printf '\n       stop with: %s' "$h"; done
+  fi
+}
+
 # Why kill port will not touch a container's port, and what stops it instead:
 # one stop command per container, since each may need a different one
 docker_refusal() {  # <port> <comma separated ids>
@@ -1306,7 +1337,7 @@ pids_table() {
 # ------------------------------------------------------------------- kill ----
 kill_cmd() {
   local kind="" target="" assume_yes=0 sig=TERM dry=0 a r p
-  local -a roots=() pids=() skipped=() all=() climbed=()
+  local -a roots=() pids=() skipped=() all=() climbed=() dnote=()
 
   for a in "$@"; do
     case "$a" in
@@ -1373,15 +1404,40 @@ kill_cmd() {
       [ "${#roots[@]}" -gt 0 ] || die "no processes in group '$target'"
       ;;
     project)
-      local hits distinct
-      hits=$(project_pids "$target")
+      local hits distinct cids want=$target phys
+      docker_ready
+      # A path is matched as the physical path every root is read back as, so
+      # one given through a symlink - /tmp and /var on a Mac - still names it.
+      # Only a path, though: a bare name is matched as a name, even when a
+      # directory of that name happens to sit in the current one.
+      case "$want" in
+        */*|.|..) if [ -d "$want" ] && phys=$(cd -P -- "$want" && pwd -P); then want=$phys; fi ;;
+      esac
+      hits=$(project_pids "$want")
       [ -n "${hits//[[:space:]]/}" ] || die "no processes for project '$target' (try: $PROG projects)"
       distinct=$(printf '%s\n' "$hits" | cut -f1 | sort -u)
       if [ "$(printf '%s\n' "$distinct" | grep -c .)" -gt 1 ]; then
         die "'$target' matches more than one project - name the path:
 $(printf '%s\n' "$distinct" | sed 's/^/    /')"
       fi
-      mapfile -t roots < <(printf '%s\n' "$hits" | cut -f2 | sort -un)
+      mapfile -t roots < <(printf '%s\n' "$hits" | awk -F'\t' '$3 == "-" { print $2 }' | sort -un)
+      # A project can run partly or wholly in containers. Their processes are
+      # never signalled: they are root's, and the clean stop is Docker's. So
+      # they are named with the command that stops them, and a project that
+      # is only containers is refused with it.
+      cids=$(printf '%s\n' "$hits" | awk -F'\t' '$3 != "-" && !s[$3]++ { o = o (o ? "," : "") $3 } END { print o }')
+      if [ -n "$cids" ]; then
+        # Refused on what could be signalled, not on what matched. The
+        # caller's own shell, and the helpers devps ran while it looked, match
+        # a project they sit in and are filtered out further down, which
+        # left a project of containers with nothing to kill and no stop said.
+        local live=0 hr
+        for hr in ${roots[@]+"${roots[@]}"}; do
+          if pid_alive "$hr" && ! is_protected "$hr"; then live=$(( live + 1 )); fi
+        done
+        [ "$live" -gt 0 ] || die "$(docker_project_refusal "$distinct" "$cids")"
+        mapfile -t dnote < <(docker_stops "$cids")
+      fi
       ;;
   esac
 
@@ -1436,6 +1492,13 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
   if [ "${#skipped[@]}" -gt 0 ]; then
     printf '  %skeeping %d pid(s) - your own shell/session: %s%s\n' \
       "$C_G" "${#skipped[@]}" "${skipped[*]}" "$C_0"
+  fi
+
+  if [ "${#dnote[@]}" -gt 0 ]; then
+    local h
+    printf '  %snot stopping %s - containers, which %s does not signal%s\n' \
+      "$C_Y" "${dnote[0]}" "$PROG" "$C_0"
+    for h in "${dnote[@]:1}"; do printf '  %sstop them with: %s%s\n' "$C_DIM" "$h" "$C_0"; done
   fi
 
   if [ "$dry" = 1 ]; then
@@ -2010,8 +2073,9 @@ dash_rows_projects() {
   mapfile -t VIEW_ROWS < <(printf '%s\n' "$rows" | awk -F'\t' -v CD="$C_DIM" -v C0="$C_0" \
     -v CG="$C_G" -v CY="$C_Y" -v CC="$C_C" -v CR="$C_R" -v HOME="$HOME" -v W="$TCOLS" "$AWKLIB"'
     function tilde(p) { sub("^" HOME "/", "~/", p); return p }
-    { printf "%s%5d%s %s%9s%s %s%8s%s  %s%-12s%s %s%s%s\n",
-        CD, $2, C0, CG, hum($3), C0, ($4 > 0 ? CY : CD), ($4 > 0 ? hum($4) : "-"), C0,
+    { printf "%s%5s%s %s%9s%s %s%8s%s  %s%-12s%s %s%s%s\n",
+        CD, ($2 > 0 ? $2 : "-"), C0, CG, ($2 > 0 ? hum($3) : "-"), C0,
+        ($4 > 0 ? CY : CD), ($4 > 0 ? hum($4) : "-"), C0,
         CC, substr($5, 1, 12), C0, ($6 ? CR : ""), shorten(tilde($1), W - 42), C0 }')
   mapfile -t VIEW_KEYS < <(printf '%s\n' "$rows" | cut -f1)
   return 0
@@ -2460,7 +2524,13 @@ watch_plain() {
 #
 # cwd is only readable for your own processes; anything else lands in
 # "unattributed", which is honest rather than silently wrong.
-PROJECT_MARKERS='.git/HEAD .git package.json composer.json go.mod Cargo.toml pyproject.toml'
+#
+# Processes in a container are the exception: their cwd, where it can be read
+# at all, is a path inside the container, so they are attributed through the
+# container instead - to the project DDEV or Compose says it belongs to.
+# .ddev/config.yaml is a marker so a DDEV site with no .git or composer.json
+# still gathers its host processes on the same row as its containers.
+PROJECT_MARKERS='.git/HEAD .git package.json composer.json go.mod Cargo.toml pyproject.toml .ddev/config.yaml'
 
 # every process's working directory as "C<TAB>pid<TAB>dir".
 #
@@ -2525,23 +2595,91 @@ PROOTLIB='
   BEGIN { nm = split(MARK, m, " ") }
 '
 
+# The containers, their published ports and which process is in which, as
+# the D, Q and K streams the project readers join on. Empty without Docker.
+docker_streams() {
+  docker_snap | physical_roots | tagged D
+  docker_ports | tagged Q
+  container_pids | tagged K
+}
+
+# Container rows with each project root resolved through symlinks. A cwd is
+# read back as the physical path - readlink on /proc, lsof on a Mac - while a
+# DDEV or Compose label keeps the path as it was given. On a Mac /var and /tmp
+# are links into /private, so without this a host process and the container
+# beside it land on two rows for one project.
+physical_roots() {
+  local id name image kind proj root ports phys
+  while IFS=$'\t' read -r id name image kind proj root ports; do
+    if [ "$root" != - ] && [ -d "$root" ] && phys=$(cd -P -- "$root" && pwd -P); then root=$phys; fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$name" "$image" "$kind" "$proj" "$root" "$ports"
+  done
+}
+
+# Where a process in a container belongs, for the project readers: the
+# approot DDEV gives, or the Compose working directory walked up to its
+# project marker like any cwd, falling back to the directory itself. DDEV
+# shared containers and bare docker run ones have no project and get a
+# bucket of their own. Needs the D and K streams and PROOTLIB.
+# shellcheck disable=SC2016  # an awk program: $1 and friends are its fields
+PCONTLIB='
+  function croot(id,   r) {
+    if (droot[id] == "-" && dk[id] != "ddev-shared") return "(in a container, no project)"
+    if (dk[id] == "ddev") return droot[id]
+    if (dk[id] == "compose") { r = proot(droot[id]); return (r == "") ? droot[id] : r }
+    return (dk[id] == "ddev-shared") ? "(DDEV shared)" : "(in a container, no project)"
+  }
+  $1 == "D" { if (!($2 in dk)) dids[++nd] = $2; dk[$2] = $5; droot[$2] = $7; next }
+  $1 == "K" { if (!($2 in kid)) kid[$2] = $3; next }
+'
+
 # TSV: root  procs  rss  swap  ports  onmnt   (rss desc, the buckets last)
 project_scan() {
-  { port_map; cwd_map; snap | tagged S; } | awk -F'\t' -v MARK="$PROJECT_MARKERS" \
-  "$PROOTLIB"'
+  { port_map; cwd_map; docker_streams; snap | tagged S; } | awk -F'\t' -v MARK="$PROJECT_MARKERS" \
+  "$PROOTLIB$PCONTLIB"'
+  function addport(r, p) { if (index("," prt[r] ",", "," p ",") == 0) prt[r] = prt[r] (prt[r] ? "," : "") p }
+  # ascending, so a DDEV project reads 32853,32854,32855 and not docker ps order
+  function sorted(s,   a, k, i, j, t, o) {
+    k = split(s, a, ",")
+    for (i = 2; i <= k; i++) { t = a[i]; for (j = i - 1; j >= 1 && a[j] + 0 > t + 0; j--) a[j + 1] = a[j]; a[j + 1] = t }
+    o = ""; for (i = 1; i <= k; i++) o = o (i > 1 ? "," : "") a[i]
+    return o
+  }
   $1 == "C" { cwd[$2] = $3; next }
   $1 == "P" { if (!($2 in pt) || index(pt[$2], $3) == 0) pt[$2] = pt[$2] (pt[$2] ? "," : "") $3; next }
+  $1 == "Q" { qp[$3] = qp[$3] (qp[$3] ? "," : "") $2; next }
   $1 == "S" {
     pid = $2; rss = $3 + 0; sw = $4 + 0
+    if ((pid in kid) && (kid[pid] in dk)) {                  # in a container
+      id = kid[pid]; r = croot(id)
+      if (r ~ /^\(/) {
+        if (!(r in bn)) buckets[++nb] = r
+        bn[r]++; br[r] += rss; bs[r] += sw
+      } else {
+        if (!(r in n)) roots[++nr] = r
+        n[r]++; rr[r] += rss; sr[r] += sw
+      }
+      next
+    }
     if (!(pid in cwd)) { hn++; hr += rss; hs += sw; next }   # cwd not readable
     r = proot(cwd[pid])
     if (r == "") { un++; ur += rss; us += sw; next }          # no project marker
     if (!(r in n)) roots[++nr] = r
     n[r]++; rr[r] += rss; sr[r] += sw
-    if (pid in pt) if (index(prt[r], pt[pid]) == 0)
-      prt[r] = prt[r] (prt[r] ? "," : "") pt[pid]
+    if (pid in pt) addport(r, pt[pid])
   }
   END {
+    # Every container claims its project and ports from docker ps, whether
+    # or not its processes can be seen. Under Docker Desktop they run in a
+    # VM, and a project that is only containers would otherwise vanish. A
+    # row with no process in sight has 0 procs, which the views print as -:
+    # its cost is unknown, not nothing.
+    for (d = 1; d <= nd; d++) {
+      id = dids[d]; r = croot(id)
+      if (r ~ /^\(/) { if (!(r in bn)) { buckets[++nb] = r; bn[r] = 0 } }
+      else if (!(r in n)) { roots[++nr] = r; n[r] = 0 }
+      k = split(qp[id], q, ","); for (i = 1; i <= k; i++) addport(r, q[i])
+    }
     for (k = 1; k <= nr; k++) {
       best = -1; bi = 0
       for (j = 1; j <= nr; j++) {
@@ -2552,32 +2690,44 @@ project_scan() {
       if (!bi) break
       r = roots[bi]; done[r] = 1
       printf "%s\t%d\t%d\t%d\t%s\t%d\n", r, n[r], rr[r], sr[r],
-             (prt[r] == "" ? "-" : prt[r]), (index(r, "/mnt/") == 1 ? 1 : 0)
+             (prt[r] == "" ? "-" : sorted(prt[r])), (index(r, "/mnt/") == 1 ? 1 : 0)
+    }
+    for (k = 1; k <= nb; k++) {
+      r = buckets[k]
+      printf "%s\t%d\t%d\t%d\t%s\t%d\n", r, bn[r], br[r], bs[r], (prt[r] == "" ? "-" : sorted(prt[r])), 0
     }
     if (un) printf "%s\t%d\t%d\t%d\t%s\t%d\n", "(not in a project)", un, ur, us, "-", 0
     if (hn) printf "%s\t%d\t%d\t%d\t%s\t%d\n", "(cwd not readable - other users)", hn, hr, hs, "-", 0
   }'
 }
 
-# "root<TAB>pid" for every process of the named project. The name matches a
-# full path, a ~-relative path, or the last path component.
+# The named project's host processes as "root<TAB>pid<TAB>-" and its
+# containers as "root<TAB>-<TAB>id". Containers come from docker ps, not from
+# their processes, which under Docker Desktop cannot be seen at all. The name
+# matches a full path, a ~-relative path, or the last path component.
 project_pids() {
-  { cwd_map; snap | tagged S; } | awk -F'\t' -v MARK="$PROJECT_MARKERS" \
-    -v WANT="$1" -v HOME="$HOME" "$PROOTLIB"'
+  { cwd_map; docker_streams; snap | tagged S; } | awk -F'\t' -v MARK="$PROJECT_MARKERS" \
+    -v WANT="$1" -v HOME="$HOME" "$PROOTLIB$PCONTLIB"'
+    function wanted(r,   b, w) {
+      if (r == "" || r ~ /^\(/) return 0
+      b = r; sub(/^.*\//, "", b)
+      w = WANT; sub("^~/", HOME "/", w); sub("/$", "", w)
+      return r == w || b == WANT
+    }
     $1 == "C" { cwd[$2] = $3; next }
     $1 == "S" {
       pid = $2
+      if ((pid in kid) && (kid[pid] in dk)) next             # its container speaks for it
       if (!(pid in cwd)) next
       r = proot(cwd[pid])
-      if (r == "") next
-      b = r; sub(/^.*\//, "", b)
-      w = WANT; sub("^~/", HOME "/", w); sub("/$", "", w)
-      if (r == w || b == WANT) printf "%s\t%s\n", r, pid
-    }'
+      if (wanted(r)) printf "%s\t%s\t-\n", r, pid
+    }
+    END { for (d = 1; d <= nd; d++) { id = dids[d]; r = croot(id); if (wanted(r)) printf "%s\t-\t%s\n", r, id } }'
 }
 
 projects_cmd() {
   local rows mnt
+  docker_ready
   rows=$(project_scan)
   printf '%s%sPROJECTS%s %s(processes grouped by the project directory they run in)%s\n' \
     "" "$C_B" "$C_0" "$C_DIM" "$C_0"
@@ -2589,8 +2739,10 @@ projects_cmd() {
     -v CY="$C_Y" -v CC="$C_C" -v CR="$C_R" -v HOME="$HOME" "$AWKLIB"'
     function tilde(p) { sub("^" HOME "/", "~/", p); return p }
     BEGIN { printf "  %6s %9s %9s  %-14s %s\n", "PROCS", "RAM", "SWAP", "PORTS", "PROJECT" }
-    { printf "  %s%6d%s %s%9s%s %s%9s%s  %s%-14s%s %s%s%s\n",
-        CD, $2, C0, CG, hum($3), C0, ($4 > 0 ? CY : CD), ($4 > 0 ? hum($4) : "-"), C0,
+    # 0 procs: containers whose processes are out of sight (Docker Desktop)
+    { printf "  %s%6s%s %s%9s%s %s%9s%s  %s%-14s%s %s%s%s\n",
+        CD, ($2 > 0 ? $2 : "-"), C0, CG, ($2 > 0 ? hum($3) : "-"), C0,
+        ($4 > 0 ? CY : CD), ($4 > 0 ? hum($4) : "-"), C0,
         CC, substr($5, 1, 14), C0, ($6 ? CR : ""), tilde($1), C0
       t += $3; s += $4; n += $2 }
     END { printf "  %s%6d %9s %9s%s\n", CD, n, hum(t), (s > 0 ? hum(s) : "-"), C0 }'
