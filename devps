@@ -2073,8 +2073,9 @@ dash_rows_projects() {
   mapfile -t VIEW_ROWS < <(printf '%s\n' "$rows" | awk -F'\t' -v CD="$C_DIM" -v C0="$C_0" \
     -v CG="$C_G" -v CY="$C_Y" -v CC="$C_C" -v CR="$C_R" -v HOME="$HOME" -v W="$TCOLS" "$AWKLIB"'
     function tilde(p) { sub("^" HOME "/", "~/", p); return p }
-    { printf "%s%5d%s %s%9s%s %s%8s%s  %s%-12s%s %s%s%s\n",
-        CD, $2, C0, CG, hum($3), C0, ($4 > 0 ? CY : CD), ($4 > 0 ? hum($4) : "-"), C0,
+    { printf "%s%5s%s %s%9s%s %s%8s%s  %s%-12s%s %s%s%s\n",
+        CD, ($2 > 0 ? $2 : "-"), C0, CG, ($2 > 0 ? hum($3) : "-"), C0,
+        ($4 > 0 ? CY : CD), ($4 > 0 ? hum($4) : "-"), C0,
         CC, substr($5, 1, 12), C0, ($6 ? CR : ""), shorten(tilde($1), W - 42), C0 }')
   mapfile -t VIEW_KEYS < <(printf '%s\n' "$rows" | cut -f1)
   return 0
@@ -2628,7 +2629,7 @@ PCONTLIB='
     if (dk[id] == "compose") { r = proot(droot[id]); return (r == "") ? droot[id] : r }
     return (dk[id] == "ddev-shared") ? "(DDEV shared)" : "(in a container, no project)"
   }
-  $1 == "D" { dk[$2] = $5; droot[$2] = $7; next }
+  $1 == "D" { if (!($2 in dk)) dids[++nd] = $2; dk[$2] = $5; droot[$2] = $7; next }
   $1 == "K" { if (!($2 in kid)) kid[$2] = $3; next }
 '
 
@@ -2658,7 +2659,6 @@ project_scan() {
         if (!(r in n)) roots[++nr] = r
         n[r]++; rr[r] += rss; sr[r] += sw
       }
-      if (!(id in ported)) { ported[id] = 1; k = split(qp[id], q, ","); for (i = 1; i <= k; i++) addport(r, q[i]) }
       next
     }
     if (!(pid in cwd)) { hn++; hr += rss; hs += sw; next }   # cwd not readable
@@ -2669,6 +2669,17 @@ project_scan() {
     if (pid in pt) addport(r, pt[pid])
   }
   END {
+    # Every container claims its project and ports from docker ps, whether
+    # or not its processes can be seen. Under Docker Desktop they run in a
+    # VM, and a project that is only containers would otherwise vanish. A
+    # row with no process in sight has 0 procs, which the views print as -:
+    # its cost is unknown, not nothing.
+    for (d = 1; d <= nd; d++) {
+      id = dids[d]; r = croot(id)
+      if (r ~ /^\(/) { if (!(r in bn)) { buckets[++nb] = r; bn[r] = 0 } }
+      else if (!(r in n)) { roots[++nr] = r; n[r] = 0 }
+      k = split(qp[id], q, ","); for (i = 1; i <= k; i++) addport(r, q[i])
+    }
     for (k = 1; k <= nr; k++) {
       best = -1; bi = 0
       for (j = 1; j <= nr; j++) {
@@ -2690,23 +2701,28 @@ project_scan() {
   }'
 }
 
-# "root<TAB>pid<TAB>container id" for every process of the named project, the
-# id - for a process on the host. The name matches a full path, a ~-relative
-# path, or the last path component.
+# The named project's host processes as "root<TAB>pid<TAB>-" and its
+# containers as "root<TAB>-<TAB>id". Containers come from docker ps, not from
+# their processes, which under Docker Desktop cannot be seen at all. The name
+# matches a full path, a ~-relative path, or the last path component.
 project_pids() {
   { cwd_map; docker_streams; snap | tagged S; } | awk -F'\t' -v MARK="$PROJECT_MARKERS" \
     -v WANT="$1" -v HOME="$HOME" "$PROOTLIB$PCONTLIB"'
-    $1 == "C" { cwd[$2] = $3; next }
-    $1 == "S" {
-      pid = $2; id = "-"
-      if ((pid in kid) && (kid[pid] in dk)) { id = kid[pid]; r = croot(id) }
-      else if (pid in cwd) r = proot(cwd[pid])
-      else next
-      if (r == "" || r ~ /^\(/) next
+    function wanted(r,   b, w) {
+      if (r == "" || r ~ /^\(/) return 0
       b = r; sub(/^.*\//, "", b)
       w = WANT; sub("^~/", HOME "/", w); sub("/$", "", w)
-      if (r == w || b == WANT) printf "%s\t%s\t%s\n", r, pid, id
-    }'
+      return r == w || b == WANT
+    }
+    $1 == "C" { cwd[$2] = $3; next }
+    $1 == "S" {
+      pid = $2
+      if ((pid in kid) && (kid[pid] in dk)) next             # its container speaks for it
+      if (!(pid in cwd)) next
+      r = proot(cwd[pid])
+      if (wanted(r)) printf "%s\t%s\t-\n", r, pid
+    }
+    END { for (d = 1; d <= nd; d++) { id = dids[d]; r = croot(id); if (wanted(r)) printf "%s\t-\t%s\n", r, id } }'
 }
 
 projects_cmd() {
@@ -2723,8 +2739,10 @@ projects_cmd() {
     -v CY="$C_Y" -v CC="$C_C" -v CR="$C_R" -v HOME="$HOME" "$AWKLIB"'
     function tilde(p) { sub("^" HOME "/", "~/", p); return p }
     BEGIN { printf "  %6s %9s %9s  %-14s %s\n", "PROCS", "RAM", "SWAP", "PORTS", "PROJECT" }
-    { printf "  %s%6d%s %s%9s%s %s%9s%s  %s%-14s%s %s%s%s\n",
-        CD, $2, C0, CG, hum($3), C0, ($4 > 0 ? CY : CD), ($4 > 0 ? hum($4) : "-"), C0,
+    # 0 procs: containers whose processes are out of sight (Docker Desktop)
+    { printf "  %s%6s%s %s%9s%s %s%9s%s  %s%-14s%s %s%s%s\n",
+        CD, ($2 > 0 ? $2 : "-"), C0, CG, ($2 > 0 ? hum($3) : "-"), C0,
+        ($4 > 0 ? CY : CD), ($4 > 0 ? hum($4) : "-"), C0,
         CC, substr($5, 1, 14), C0, ($6 ? CR : ""), tilde($1), C0
       t += $3; s += $4; n += $2 }
     END { printf "  %s%6d %9s %9s%s\n", CD, n, hum(t), (s > 0 ? hum(s) : "-"), C0 }'

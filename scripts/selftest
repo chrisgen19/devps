@@ -524,6 +524,23 @@ rm -rf "$decoy"
 has "kill project from inside a containers-only project still says how to stop it" \
   "$(cd "$solo" && dp kill project . -d 2>&1 > /dev/null)" "stop it with: ddev stop solo"
 
+# Under Docker Desktop the processes run in a VM, and no cgroup on this
+# machine names a container. docker ps still knows every container and its
+# project, so the projects are still listed, cost unknown, and still refused
+# or noted with their stop. An empty cgroup fixture plays the VM.
+cg_none=$(mktemp)
+dd() { DEVPS_DOCKER_PS="$dps" DEVPS_CGROUPS="$cg_none" "$devps_abs" "$@"; }
+desk_out=$(dd projects)
+desk_row() { printf '%s\n' "$desk_out" | awk -v p="$1" 'substr($0, length($0) - length(p) + 1) == p'; }
+same "under Docker Desktop a project of containers keeps its row and ports, cost unknown" \
+  "$(desk_row /home/u/wp/aha | awk '{ print $1, $2, $4 }')" "- - 32854,32855"
+has "and DDEV shared keeps its row" "$(desk_row '(DDEV shared)')" "80,8025,8026"
+has "kill project still refuses it with its stop, with no process in sight" \
+  "$(dd kill project /home/u/wp/aha -d 2>&1 > /dev/null)" "stop it with: ddev stop aha"
+has "and a mixed project still names the containers it leaves" \
+  "$(dd kill project "$walk_link" -d)" "not stopping shop-web"
+rm -f "$cg_none"
+
 # And for real, not a dry run: the host process goes, the container's stays.
 dp kill project "$walk_link" -y > /dev/null
 for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$s_host" 2> /dev/null || break; sleep 0.5; done
