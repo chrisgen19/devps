@@ -199,6 +199,19 @@ function gcol(g) {
   }
   return (g in GC) ? GC[g] : ""
 }
+# "[container] " ahead of the command of a process that runs in one, from
+# CMAP (pid=name|pid=name|...), so a mysqld in a DDEV project reads as that
+# project, not as a stray database. Empty for everything else, and for every
+# caller that passes no CMAP.
+function ctag(pid) {
+  if (!ct_ready) {
+    ct_ready = 1
+    ct_n = split(CMAP, ct_a, "|")
+    for (ct_i = 1; ct_i <= ct_n; ct_i++)
+      if (split(ct_a[ct_i], ct_b, "=") == 2) CT[ct_b[1]] = ct_b[2]
+  }
+  return (pid in CT) ? "[" CT[pid] "] " : ""
+}
 # Mask secrets in a command line when DEVPS_REDACT is set. Read from the
 # environment rather than passed in, so the nine call sites do not each need
 # their own -v. Two shapes cover what actually leaks into a process list: a URL
@@ -761,6 +774,20 @@ container_pids() {
 # Load the rows once, in the caller's shell, unless a caller already has
 docker_ready() { [ "$DOCKER_LOADED" = 1 ] || docker_load; }
 
+# pids on stdin -> pid=name|pid=name|... for those that run in a container:
+# the CMAP that ctag reads to put the container ahead of a command in the
+# process tables. Which pids are in a container is a grep; naming the
+# containers takes docker ps, a tenth of a second, so it is only asked when
+# a row about to be shown is in one - devps top rarely is.
+container_tagmap() {
+  local inside
+  inside=$({ container_pids | sed 's/^/C\t/'; sed 's/^/P\t/'; } |
+    awk -F'\t' '$1 == "C" { c[$2] = $3; next } ($2 in c) { print $2 "\t" c[$2] }')
+  [ -n "$inside" ] || return 0
+  { docker_snap | awk -F'\t' '{ print "D\t" $1 "\t" $2 }'; printf '%s\n' "$inside" | sed 's/^/I\t/'; } |
+    awk -F'\t' '$1 == "D" { n[$2] = $3; next } ($3 in n) { printf "%s=%s|", $2, n[$3] }'
+}
+
 # The processes that forward a published port into a container. Linux runs a
 # docker-proxy per binding; Docker Desktop on macOS listens in its backend;
 # rootless Docker listens in RootlessKit's port driver - rootlesskit itself,
@@ -1129,7 +1156,7 @@ group_table() {
 
 # proc_table <title> <limit> <rss|swap> <groupfilter> <showgroupcol>
 proc_table() {
-  local title="$1" limit="$2" sortf="$3" gf="$4" showg="$5" input
+  local title="$1" limit="$2" sortf="$3" gf="$4" showg="$5" input cmap
   input=$(snap)
   [ "$sortf" = swap ] && input=$(printf '%s\n' "$input" | sort -t$'\t' -k3,3nr)
   [ -n "$gf" ] && input=$(printf '%s\n' "$input" | awk -F'\t' -v g="$gf" '$6 == g')
@@ -1137,18 +1164,22 @@ proc_table() {
     printf '%s%s%s\n  %s(none)%s\n\n' "$C_B" "$title" "$C_0" "$C_DIM" "$C_0"
     return
   fi
+  input=$(printf '%s\n' "$input" | head -n "$limit")
+  cmap=$(printf '%s\n' "$input" | cut -f1 | container_tagmap)
   printf '%s%s%s\n' "$C_B" "$title" "$C_0"
-  printf '%s\n' "$input" | head -n "$limit" | awk -F'\t' -v SHOWG="$showg" \
-    -v C0="$C_0" -v GCOLS="$GCOLS_STR" "$AWKLIB"'
+  printf '%s\n' "$input" | awk -F'\t' -v SHOWG="$showg" \
+    -v C0="$C_0" -v CC="$C_C" -v GCOLS="$GCOLS_STR" -v CMAP="$cmap" "$AWKLIB"'
   BEGIN {
     if (SHOWG) printf "  %7s %8s %8s  %-11s %8s  %s\n", "PID","RAM","SWAP","GROUP","UPTIME","COMMAND"
     else       printf "  %7s %8s %8s %8s  %s\n",        "PID","RAM","SWAP","UPTIME","COMMAND"
   }
   {
     sw = ($3 > 0 ? hum($3) : "-")
+    t = ctag($1); w = (SHOWG ? 58 : 66) - length(t); if (w < 20) w = 20
+    cmd = (t == "" ? "" : CC t C0) shorten($7, w)
     if (SHOWG) printf "  %7s %8s %8s  %s%-11s%s %8s  %s\n", $1, hum($2), sw,
-                      gcol($6), $6, C0, dur($4), shorten($7, 58)
-    else       printf "  %7s %8s %8s %8s  %s\n",        $1, hum($2), sw, dur($4), shorten($7, 66)
+                      gcol($6), $6, C0, dur($4), cmd
+    else       printf "  %7s %8s %8s %8s  %s\n",        $1, hum($2), sw, dur($4), cmd
   }'
   echo
 }
@@ -1471,18 +1502,21 @@ idle_cmd() {
   printf '%sIDLE - alive a while, doing nothing, or left behind (kill candidates)%s\n' "$C_B" "$C_0"
   printf '  %sidle: up > 20 min, CPU < 1%% right now, RAM > 20M%s\n' "$C_DIM" "$C_0"
   printf '  %sorphan: its parent is gone, so nobody is watching it any more%s\n' "$C_DIM" "$C_0"
-  local rows
+  local rows cmap
   DP_IO=0
   rows=$(snapshot_rate 0.3 | awk -F'\t' -v OFS='\t' "$IDLE_AWK" | sort -t$'\t' -k2,2nr)
   if [ -z "${rows//[[:space:]]/}" ]; then
     printf '  %s(nothing obviously idle or orphaned)%s\n\n' "$C_DIM" "$C_0"; return
   fi
+  cmap=$(printf '%s\n' "$rows" | cut -f1 | container_tagmap)
   printf '%s\n' "$rows" | awk -F'\t' -v CD="$C_DIM" -v C0="$C_0" -v CY="$C_Y" -v CR="$C_R" \
-    "$AWKLIB"'
+    -v CC="$C_C" -v CMAP="$cmap" "$AWKLIB"'
     BEGIN { printf "  %7s %8s %8s %7s %8s  %-11s %s\n",
                    "PID","RAM","SWAP","CPU%","UPTIME","WHY","COMMAND" }
-    { printf "  %7s %8s %8s %6.1f%% %8s  %s%-11s%s %s\n", $1, hum($2), ($3 > 0 ? hum($3) : "-"),
-             $11, dur($4), ($14 ~ /orphan/ ? CR : CY), $14, C0, shorten($7, 44)
+    { t = ctag($1); w = 44 - length(t); if (w < 16) w = 16
+      printf "  %7s %8s %8s %6.1f%% %8s  %s%-11s%s %s%s\n", $1, hum($2), ($3 > 0 ? hum($3) : "-"),
+             $11, dur($4), ($14 ~ /orphan/ ? CR : CY), $14, C0,
+             (t == "" ? "" : CC t C0), shorten($7, w)
       r += $2; s += $3; n++ }
     END { printf "  %sstopping all %d would return %s RAM and %s swap%s\n", CD, n, hum(r), hum(s), C0 }'
   echo
@@ -1570,6 +1604,7 @@ FRAME=0
 LAST_US=0
 SAMPLE_US=0
 DOCKER_US=0
+DASH_CMAP=""
 RENDER_S=0.12
 CLK_TCK=100
 PREVF=""
@@ -1719,6 +1754,7 @@ dash_sample() {
   if [ $(( us - DOCKER_US )) -ge 10000000 ]; then docker_load; DOCKER_US=$us; fi
 
   SNAP=$(snapshot)
+  DASH_CMAP=$(printf '%s\n' "$SNAP" | cut -f1 | container_tagmap)
   # join the previous tick counts in, so each row carries a real instant CPU%
   # match on FILENAME, not NR == FNR: on the very first sample the previous
   # file is empty, and the NR == FNR idiom then swallows every row of stdin
@@ -1808,7 +1844,7 @@ dash_rows_idle() {
 # selection pointer cannot be eaten by a colour reset inside the row
 dash_fmt_proc() {
   awk -F'\t' -v WHY="${1:-}" -v W="$TCOLS" -v CD="$C_DIM" -v C0="$C_0" -v CR="$C_R" -v CY="$C_Y" \
-      -v CG="$C_G" -v CN="$C_NEW" -v GCOLS="$GCOLS_STR" \
+      -v CG="$C_G" -v CN="$C_NEW" -v CC="$C_C" -v GCOLS="$GCOLS_STR" -v CMAP="$DASH_CMAP" \
       -v BLKS="$(IFS=,; printf '%s' "${BLK[*]}")" -v EMPTY="$BAR_EMPTY" "$AWKLIB"'
   function micro(v, mx, w,   f, s, i) {
     if (mx <= 0) mx = 1
@@ -1838,16 +1874,18 @@ dash_fmt_proc() {
       # the idle view answers "why is this here", every other view "what is it"
       tag  = (WHY != "") ? f[14] : f[6]
       tagc = (WHY == "") ? gcol(f[6]) : (f[14] ~ /orphan/ ? CR : CY)
+      ct   = ctag(f[1]); w = cmdw - length(ct); if (w < 12) w = 12
+      cmd  = (ct == "" ? "" : CC ct C0) shorten(f[7], w)
       if (wide)
         printf "%s%7s%s %s%8s%s %s%s%s %s%7s%s %s%5.1f%%%s %s%8s%s %s%8s%s %s%-10s%s %s\n",
           pc, f[1], C0, rc, hum(f[2]), C0, rc, micro(f[2], mx, 8), C0,
           swc, sw, C0, cc, cpu, C0,
           ioc, (io > 0 ? hum(io / 1024) "/s" : "-"), C0,
-          CD, dur(f[4]), C0, tagc, tag, C0, shorten(f[7], cmdw)
+          CD, dur(f[4]), C0, tagc, tag, C0, cmd
       else
         printf "%s%7s%s %s%8s%s %s%7s%s %s%5.1f%%%s %s%8s%s %s\n",
           pc, f[1], C0, rc, hum(f[2]), C0, swc, sw, C0,
-          cc, cpu, C0, CD, dur(f[4]), C0, shorten(f[7], cmdw)
+          cc, cpu, C0, CD, dur(f[4]), C0, cmd
     }
   }'
 }

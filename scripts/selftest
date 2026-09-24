@@ -394,6 +394,18 @@ else
   fail "the dashboard's x and X both stop a port through kill port"
 fi
 
+# Processes inside a container keep their own group, and the process tables
+# say which container: the throwaway sleep plays a process in ddev-aha-web.
+has "a process inside a container carries its name in the process tables" \
+  "$(dk group other | awk -v p="$inner_pid" '$1 == p')" "[ddev-aha-web] sleep 30"
+same "and with Docker off it does not" \
+  "$(DEVPS_DOCKER=0 DEVPS_DOCKER_PS="$dps" DEVPS_CGROUPS="$cgf" "$DEVPS" group other |
+     awk -v p="$inner_pid" '$1 == p' | grep -c '\[ddev-aha-web\]')" 0
+eval "$(sed -n "/^AWKLIB='/,/^'$/p" "$DEVPS")"
+same "ctag names the container for its own pids and nothing else" \
+  "$(awk -v CMAP="4242=web-a|4343=web-b|" "$AWKLIB"'
+       BEGIN { printf "%s|%s|%s", ctag(4242), ctag(4343), ctag(1) }')" "[web-a] |[web-b] |"
+
 same "each kind of container gets its own clean stop" \
   "$(docker_stop_hint ddev aha x; echo; docker_stop_hint ddev-shared - x; echo
      docker_stop_hint compose shop x; echo; docker_stop_hint run - scratch)" \
