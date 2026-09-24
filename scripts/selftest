@@ -34,6 +34,19 @@ ok() {
   if "$@" > /dev/null; then pass "$desc"; else fail "$desc (exit $?)"; fi
 }
 
+# same <description> <got> <want>   - exact match; a miss shows what came back
+same() {
+  if [ "$2" = "$3" ]; then pass "$1"; else fail "$1 (got: $(printf '%s' "$2" | tr '\t\n' ':,'))"; fi
+}
+
+# has <description> <text> <substring>   - the text must contain it
+has() {
+  case "$2" in
+    *"$3"*) pass "$1" ;;
+    *)      fail "$1 (got: $(printf '%s' "$2" | tr '\n' '|' | cut -c1-120))" ;;
+  esac
+}
+
 # rejects <description> <command...>   - command must fail
 rejects() {
   local desc="$1"; shift
@@ -98,23 +111,25 @@ group "a port held by another user is not reported free"
 # ss withholds the pid of another user's socket, and port and kill port used to
 # skip those rows before looking, so a taken port read as a free one. A runner
 # has no other user's port open, so a fixture stands in: 80 held, 81 free.
+# Docker is off: on a machine running containers, 80 may really be published,
+# and then the right answer is the container - which is tested further down.
 lsn=$(mktemp)
 printf '80\t\n' > "$lsn"
-rejects "port on a held port still fails" env DEVPS_LISTENERS="$lsn" "$DEVPS" port 80
-held_err=$(DEVPS_LISTENERS="$lsn" "$DEVPS" port 80 2>&1 > /dev/null)
+held() { env DEVPS_DOCKER=0 DEVPS_LISTENERS="$lsn" "$DEVPS" "$@"; }
+rejects "port on a held port still fails" held port 80
+held_err=$(held port 80 2>&1 > /dev/null)
 case "$held_err" in
   *"held by another user"*) pass "port names the other user instead of calling it free" ;;
   *) fail "port names the other user instead of calling it free (got: $held_err)" ;;
 esac
-free_err=$(DEVPS_LISTENERS="$lsn" "$DEVPS" port 81 2>&1 > /dev/null)
+free_err=$(held port 81 2>&1 > /dev/null)
 case "$free_err" in
   *"nothing listening"*) pass "a port nobody holds is still reported free" ;;
   *) fail "a port nobody holds is still reported free (got: $free_err)" ;;
 esac
 # -d as well, so a regression here fails the test rather than signalling
-rejects "kill port on a held port still fails" \
-  env DEVPS_LISTENERS="$lsn" "$DEVPS" kill port 80 -d
-held_err=$(DEVPS_LISTENERS="$lsn" "$DEVPS" kill port 80 -d 2>&1 > /dev/null)
+rejects "kill port on a held port still fails" held kill port 80 -d
+held_err=$(held kill port 80 -d 2>&1 > /dev/null)
 case "$held_err" in
   *"not yours to stop"*) pass "kill port says the port is taken, not free" ;;
   *) fail "kill port says the port is taken, not free (got: $held_err)" ;;
@@ -176,6 +191,218 @@ open(sys.argv[1], "w").write(str(s.getsockname()[1])); time.sleep(20)' "$portfil
   wait "$lpid" 2>/dev/null || true
   rm -f "$portfile"
 fi
+
+group "docker: containers, their ports and processes"
+# Drive the real docker section out of the script against captured docker ps
+# rows: a DDEV project, DDEV's shared router and ssh agent, a compose project
+# and a bare docker run, plus the kind of line a failing daemon prints.
+# shellcheck disable=SC2034  # read by container_pids, which arrives by eval
+case "$PLAT" in Darwin) DP_PLATFORM=darwin ;; *) DP_PLATFORM=linux ;; esac
+eval "$(sed -n '/^# -* docker ----$/,/^# -* psi ----$/p' "$DEVPS")"
+idw=$(printf 'a%.0s' {1..64}); idr=$(printf 'b%.0s' {1..64})
+ids=$(printf 'c%.0s' {1..64}); idc=$(printf 'd%.0s' {1..64})
+idn=$(printf 'e%.0s' {1..64})
+dps=$(mktemp)
+docker_fixture() {
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$idw" ddev-aha-web ddev/ddev-webserver:v1.25.1 aha /home/u/wp/aha ddev-aha \
+      /home/u/wp/aha/.ddev '127.0.0.1:32854->80/tcp, 127.0.0.1:32855->443/tcp' \
+    "$idr" ddev-router ddev/ddev-traefik-router:v1.25.1 '' '' ddev-router \
+      /home/u/.ddev '127.0.0.1:80->80/tcp, 127.0.0.1:8025-8026->8025-8026/tcp' \
+    "$ids" ddev-ssh-agent ddev/ddev-ssh-agent:v1.25.1 '' '' ddev-ssh-agent \
+      /home/u/.ddev '' \
+    "$idc" shop-db-1 postgres:17 '' '' shop \
+      /home/u/projects/shop '0.0.0.0:5433->5432/tcp, :::5433->5432/tcp' \
+    "$idn" scratch redis:7 '' '' '' \
+      '' '6379/tcp, 0.0.0.0:9000->9000/udp'
+  echo 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock'
+}
+docker_fixture > "$dps"
+
+rows=$(DEVPS_DOCKER_PS="$dps" docker_rows)
+same "labels decide each container's kind, project and root" \
+  "$(printf '%s\n' "$rows" | cut -f2,4-6)" \
+  "$(printf '%s\t%s\t%s\t%s\n' \
+      ddev-aha-web   ddev        aha            /home/u/wp/aha \
+      ddev-router    ddev-shared ddev-router    /home/u/.ddev \
+      ddev-ssh-agent ddev-shared ddev-ssh-agent /home/u/.ddev \
+      shop-db-1      compose     shop           /home/u/projects/shop \
+      scratch        run         -              -)"
+# bash read collapses a run of tabs, so an empty field would shift the rest
+if printf '%s\n' "$rows" | awk -F'\t' '
+     NF != 7 { bad = 1 } { for (i = 1; i <= NF; i++) if ($i == "") bad = 1 }
+     END { exit bad }'; then
+  pass "every row has seven fields and none of them is empty"
+else
+  fail "every row has seven fields and none of them is empty"
+fi
+same "ranges expand, IPv4 and IPv6 collapse, unpublished and udp are skipped" \
+  "$(DEVPS_DOCKER_PS="$dps" docker_ports | sort -n)" \
+  "$(printf '%s\t%s\t%s\n' \
+      80 "$idr" 80/tcp   5433 "$idc" 5432/tcp  8025 "$idr" 8025/tcp \
+      8026 "$idr" 8026/tcp  32854 "$idw" 80/tcp  32855 "$idw" 443/tcp)"
+
+# cgroup v1 repeats the path once per controller; both drivers' spellings
+cgf=$(mktemp)
+printf '%s\n' "/proc/4242/cgroup:docker-$idw" \
+  "/proc/4343/cgroup:/docker/$idc" "/proc/4343/cgroup:/docker/$idc" > "$cgf"
+same "both cgroup drivers map a process to its container, once each" \
+  "$(DEVPS_CGROUPS="$cgf" container_pids)" \
+  "$(printf '%s\t%s\n' 4242 "$idw" 4343 "$idc")"
+
+same "DEVPS_DOCKER=0 turns every reader off" \
+  "$(DEVPS_DOCKER=0 DEVPS_DOCKER_PS="$dps" docker_rows
+     DEVPS_DOCKER=0 DEVPS_CGROUPS="$cgf" container_pids)" ""
+same "no docker on PATH is no containers, not an error" \
+  "$(PATH=/nonexistent docker_rows; echo "exit=$?")" "exit=0"
+# A daemon on another machine publishes ports over there. Five rows means the
+# fixture was read; none means the daemon was judged remote and skipped.
+rows_via() { DOCKER_HOST=$1 DEVPS_DOCKER_PS="$dps" docker_rows | awk 'END { print NR }'; }
+same "an ssh daemon's containers are not this machine's" "$(rows_via ssh://deploy@build.example.com)" 0
+same "nor are a tcp daemon's on another host" "$(rows_via tcp://10.0.0.5:2376)" 0
+same "a local socket and loopback tcp still count" \
+  "$(rows_via unix:///var/run/docker.sock; rows_via tcp://127.0.0.1:2375; rows_via tcp://localhost:2375)" \
+  "$(printf '5\n5\n5')"
+# A named context is looked up. A stand-in docker plays the CLI: it answers
+# with the endpoint it resolved, or fails when told to.
+fake_bin=$(mktemp -d)
+# shellcheck disable=SC2016  # written into the stand-in, which expands it
+printf '#!/bin/sh\n[ "$FAKE_ENDPOINT" = fail ] && exit 1\necho "$FAKE_ENDPOINT"\n' > "$fake_bin/docker"
+chmod +x "$fake_bin/docker"
+ctx_rows() {  # <endpoint the CLI resolves> [DOCKER_HOST]
+  ( export PATH="$fake_bin:$PATH" DOCKER_CONTEXT=prod FAKE_ENDPOINT=$1
+    if [ -n "${2:-}" ]; then export DOCKER_HOST=$2; else unset DOCKER_HOST; fi
+    DEVPS_DOCKER_PS="$dps" docker_rows ) | awk 'END { print NR }'
+}
+same "a context pointing at another host is remote" "$(ctx_rows ssh://deploy@build.example.com)" 0
+same "a context on a local socket is not" "$(ctx_rows unix:///run/user/1000/docker.sock)" 5
+# With DOCKER_HOST and DOCKER_CONTEXT both set, the docs and the CLI disagree
+# on which wins, so devps takes the CLI's answer in either direction.
+same "with both set, a remote answer from the CLI is remote" \
+  "$(ctx_rows ssh://deploy@build.example.com unix:///var/run/docker.sock)" 0
+same "and a local answer is local" \
+  "$(ctx_rows unix:///var/run/docker.sock ssh://deploy@build.example.com)" 5
+same "a CLI that cannot answer leaves DOCKER_HOST standing" \
+  "$(ctx_rows fail ssh://deploy@build.example.com)" 0
+same "and so does one that answers with nothing" "$(ctx_rows '' ssh://deploy@build.example.com)" 0
+rm -rf "$fake_bin"
+
+# last, because it empties the fixture to prove nothing re-reads it
+if ( export DEVPS_DOCKER_PS="$dps"; docker_load; : > "$dps"
+     [ "$(docker_snap | awk 'END { print NR }')" = 5 ] ); then
+  pass "docker_load asks once and docker_snap answers from that"
+else
+  fail "docker_load asks once and docker_snap answers from that"
+fi
+rm -f "$dps" "$cgf"
+
+# The fixture pins docker's format; this proves the real daemon still prints
+# it. Only a daemon on this kernel puts container processes where the cgroup
+# scan can see them, so that half needs dockerd in this process list.
+if ! command -v docker > /dev/null || ! docker info > /dev/null 2>&1; then
+  skip "live docker (no reachable daemon)"
+elif [ "$(docker ps -q | awk 'END { print NR }')" = 0 ]; then
+  skip "live docker (no containers running)"
+else
+  same "docker_rows reads every running container" \
+    "$(docker_rows | awk 'END { print NR }')" "$(docker ps -q | awk 'END { print NR }')"
+  if [ "$PLAT" = Linux ] && pgrep -x dockerd > /dev/null; then
+    same "every running container's processes are found through cgroups" \
+      "$({ container_pids | sed 's/^/P\t/'; docker_rows | sed 's/^/D\t/'; } | awk -F'\t' '
+          $1 == "P" { seen[$3] = 1; next } !($2 in seen) { print $3 }')" ""
+  else
+    skip "container processes (the daemon is not on this kernel)"
+  fi
+fi
+
+group "docker: a published port names its container"
+# The captured containers again, now behind listening sockets: 80 and 32854
+# with no pid to show, as docker-proxy's are to anyone but root; 8025 held by a
+# visible forwarder, which is what sudo sees, or Docker Desktop's backend on a
+# Mac; 32855 by an ordinary process that happens to share a published port;
+# and 5432 by another user with no container at all. 8026 is held by
+# rootless Docker's forwarder, and 8080 is published by two containers, on two
+# host addresses. A throwaway sleep stands in for a process inside
+# ddev-aha-web, so the container has RAM to report.
+{ docker_fixture
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(printf '1%.0s' {1..64})" web-a nginx '' '' proja /home/u/a '127.0.0.1:8080->80/tcp' \
+    "$(printf '2%.0s' {1..64})" web-b nginx '' '' projb /home/u/b '127.0.0.2:8080->80/tcp'
+} > "$dps"
+fwd_dir=$(mktemp -d)
+cp "$(command -v sleep)" "$fwd_dir/docker-proxy"
+cp "$(command -v sleep)" "$fwd_dir/rootlesskit"
+"$fwd_dir/docker-proxy" 30 & fwd_pid=$!
+"$fwd_dir/rootlesskit" 30 & rlk_pid=$!
+sleep 30 & plain_pid=$!
+sleep 30 & inner_pid=$!
+printf '%s\n' "/proc/$inner_pid/cgroup:docker-$idw" > "$cgf"
+lsn=$(mktemp)
+printf '%s\t%s\n' 80 '' 5432 '' 8025 "$fwd_pid" 8026 "$rlk_pid" 8080 '' \
+  32854 '' 32855 "$plain_pid" > "$lsn"
+dk() { DEVPS_LISTENERS="$lsn" DEVPS_DOCKER_PS="$dps" DEVPS_CGROUPS="$cgf" "$DEVPS" "$@"; }
+dk_ports=$(dk ports)
+port_row() { printf '%s\n' "$dk_ports" | awk -v p="$1" '$1 == p'; }
+
+has "a published port with no pid names its container" \
+  "$(port_row 80)" "[docker] ddev-router 80/tcp  (DDEV shared)"
+has "and a project's container names the project" \
+  "$(port_row 32854)" "[docker] ddev-aha-web 80/tcp  /home/u/wp/aha"
+same "its RAM is the processes inside it" "$(port_row 32854 | awk '{ print ($3 != "-") }')" 1
+has "a visible forwarder is shown as the container, not itself" \
+  "$(port_row 8025)" "[docker] ddev-router 8025/tcp"
+has "and so is rootless Docker's forwarder" "$(port_row 8026)" "[docker] ddev-router 8026/tcp"
+has "an ordinary process on a published port is still itself" "$(port_row 32855)" "sleep 30"
+has "two containers on one port are both counted" "$(port_row 8080)" "web-a 80/tcp (+1 more)"
+has "a port with no container is still another user's" "$(port_row 5432)" "(another user"
+has "DEVPS_DOCKER=0 puts the ports back as they were" \
+  "$(DEVPS_DOCKER=0 DEVPS_LISTENERS="$lsn" DEVPS_DOCKER_PS="$dps" "$DEVPS" ports | awk '$1 == 80')" \
+  "(another user"
+
+port_out=$(dk port 80)
+has "port shows the container instead of a process" "$port_out" "container    : ddev-router"
+has "and the command that stops it" "$port_out" "stop with    : ddev poweroff"
+port_out=$(dk port 32854)
+has "a project's container stops with its project" "$port_out" "stop with    : ddev stop aha"
+same "and port lists the processes inside it" \
+  "$(printf '%s\n' "$port_out" | awk -v p="$inner_pid" '$1 == p { print "found" }')" found
+same "port names every container on a shared port" \
+  "$(dk port 8080 | awk '/container    :/ { printf "%s ", $3 }')" "web-a web-b "
+
+# -d throughout, so a regression fails the test rather than signalling
+rejects "kill port refuses a container's port" dk kill port 80 -d
+has "and says how to stop the container instead" \
+  "$(dk kill port 80 -d 2>&1 > /dev/null)" "stop it with: ddev poweroff"
+# the one that matters: the forwarder climbs to dockerd, or is Docker Desktop
+has "kill port never targets the forwarder" \
+  "$(dk kill port 8025 -d 2>&1 > /dev/null)" "published by the container ddev-router"
+has "or rootless Docker's, which would take every container with it" \
+  "$(dk kill port 8026 -d 2>&1 > /dev/null)" "published by the container ddev-router"
+has "but still stops an ordinary process that shares a published port" \
+  "$(dk kill port 32855 -d)" "$plain_pid"
+kill_out=$(dk kill port 8080 -d 2>&1 > /dev/null)
+has "kill port on a shared port gives a stop for each container" "$kill_out" \
+  "stop web-a with: docker compose -p proja stop"
+has "including the second" "$kill_out" "stop web-b with: docker compose -p projb stop"
+
+# The dashboard needs a terminal, so its keys are checked in the source: in
+# the ports view, X must go through kill port as x does. Through kill pid it
+# would force-stop the forwarder a container's row is showing.
+if [ "$(grep -c 'dash_do_kill port "[$]{VIEW_PORTS\[[$]DASH_SEL\]}"' "$DEVPS")" -ge 2 ]; then
+  pass "the dashboard's x and X both stop a port through kill port"
+else
+  fail "the dashboard's x and X both stop a port through kill port"
+fi
+
+same "each kind of container gets its own clean stop" \
+  "$(docker_stop_hint ddev aha x; echo; docker_stop_hint ddev-shared - x; echo
+     docker_stop_hint compose shop x; echo; docker_stop_hint run - scratch)" \
+  "$(printf '%s\n' 'ddev stop aha' 'ddev poweroff  (stops every DDEV project)' \
+      'docker compose -p shop stop' 'docker stop scratch')"
+
+kill "$fwd_pid" "$rlk_pid" "$plain_pid" "$inner_pid" 2>/dev/null || true
+wait "$fwd_pid" "$rlk_pid" "$plain_pid" "$inner_pid" 2>/dev/null || true
+rm -rf "$fwd_dir"; rm -f "$dps" "$cgf" "$lsn"
 
 group "project attribution reaches deep working directories"
 # a pnpm store or a monorepo package can sit a dozen levels under its own root;
