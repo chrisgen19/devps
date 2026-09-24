@@ -847,6 +847,13 @@ docker_port_labels() {
 # and every container under -9, goes to docker stop or docker kill by name.
 # DEVPS_DDEV names the ddev CLI, so a test can stand one in rather than stop
 # a real site.
+#
+# Nothing goes into a command unless it reads as a plain name: a DDEV site
+# name is a label, which anyone writing a compose file can set, and a site
+# called "--all" would make "ddev stop --all", which stops every project.
+# A site name that is not plain falls back to docker stop by container name;
+# those are Docker's own and always plain, but are held to it all the same.
+DP_PLAIN_NAME='^[A-Za-z0-9][A-Za-z0-9_.-]*$'
 container_stop_plan() {  # <comma separated ids> <TERM|KILL>
   local id name kind proj site verb=stop have_ddev=0
   local -A sites=()
@@ -857,7 +864,12 @@ container_stop_plan() {  # <comma separated ids> <TERM|KILL>
     name=""
     IFS=$'\t' read -r _ name _ kind proj _ < <(docker_snap | awk -F'\t' -v id="$id" '$1 == id')
     [ -n "$name" ] || continue
-    if [ "$verb" = stop ] && [ "$kind" = ddev ] && [ "$have_ddev" = 1 ]; then
+    if ! [[ $name =~ $DP_PLAIN_NAME ]]; then
+      printf '%s: leaving out a container whose name is not a plain name: %q\n' "$PROG" "$name" >&2
+      continue
+    fi
+    if [ "$verb" = stop ] && [ "$kind" = ddev ] && [ "$have_ddev" = 1 ] &&
+       [[ $proj =~ $DP_PLAIN_NAME ]]; then
       if [ -z "${sites[$proj]:-}" ]; then sites[$proj]=1; order+=("$proj"); fi
     else
       names+=("$name")
@@ -883,7 +895,9 @@ container_stop_preview() {  # <comma separated ids> <plan lines...>
 }
 
 # Run the plan. Its commands get no stdin, so nothing can sit waiting on a
-# keyboard, and a failure is said and returned rather than passed over.
+# keyboard, and a failure is said and returned rather than passed over. A
+# line splits back into exactly the words the plan wrote, because the plan
+# only ever writes plain names.
 container_stop_run() {  # <plan lines...>
   local line rc=0
   local -a argv=()

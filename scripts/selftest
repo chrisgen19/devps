@@ -340,7 +340,11 @@ group "docker: a published port names its container"
 { docker_fixture
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$(printf '1%.0s' {1..64})" web-a nginx '' '' proja /home/u/a '127.0.0.1:8080->80/tcp' \
-    "$(printf '2%.0s' {1..64})" web-b nginx '' '' projb /home/u/b '127.0.0.2:8080->80/tcp'
+    "$(printf '2%.0s' {1..64})" web-b nginx '' '' projb /home/u/b '127.0.0.2:8080->80/tcp' \
+    "$(printf '6%.0s' {1..64})" ddev-evil-web ddev/ddev-webserver '--all' /home/u/wp/evil \
+      ddev-evil /home/u/wp/evil/.ddev '127.0.0.1:32870->80/tcp' \
+    "$(printf '5%.0s' {1..64})" ddev-evil2-web ddev/ddev-webserver 'aha --all' /home/u/wp/evil2 \
+      ddev-evil2 /home/u/wp/evil2/.ddev '127.0.0.1:32871->80/tcp'
 } > "$dps"
 fwd_dir=$(mktemp -d)
 cp "$(command -v sleep)" "$fwd_dir/docker-proxy"
@@ -352,7 +356,7 @@ sleep 30 & inner_pid=$!
 printf '%s\n' "/proc/$inner_pid/cgroup:docker-$idw" > "$cgf"
 lsn=$(mktemp)
 printf '%s\t%s\n' 80 '' 5432 '' 8025 "$fwd_pid" 8026 "$rlk_pid" 8080 '' \
-  32854 '' 32855 "$plain_pid" > "$lsn"
+  32854 '' 32855 "$plain_pid" 32870 '' 32871 '' > "$lsn"
 dk() { PATH="$fake_cli:$PATH" DEVPS_DDEV="${DEVPS_DDEV:-$fake_cli/ddev}" \
   DEVPS_LISTENERS="$lsn" DEVPS_DOCKER_PS="$dps" DEVPS_CGROUPS="$cgf" "$DEVPS" "$@"; }
 dk_ports=$(dk ports)
@@ -418,6 +422,18 @@ rejects "a stop that fails is a failure" env FAKE_FAIL=1 PATH="$fake_cli:$PATH" 
 : > "$fake_log"
 dk kill port 80 -y > /dev/null 2>&1
 same "and the router, shared by every DDEV project, is never stopped for one port" "$(stops)" ""
+
+# A DDEV site name is a label anyone can write. One that reads as an option,
+# or splits into words, never reaches ddev: "ddev stop --all" stops every
+# project. The container goes to docker stop by its own name instead.
+has "a site label that reads as an option never reaches ddev" \
+  "$(dk kill port 32870 -d)" '$ docker stop ddev-evil-web'
+: > "$fake_log"
+dk kill port 32870 -y > /dev/null
+same "and for real, only the one container is stopped" "$(stops)" "docker stop ddev-evil-web"
+: > "$fake_log"
+dk kill port 32871 -y > /dev/null
+same "nor does one that splits into words" "$(stops)" "docker stop ddev-evil2-web"
 
 # The dashboard needs a terminal, so its keys are checked in the source: in
 # the ports view, X must go through kill port as x does. Through kill pid it
