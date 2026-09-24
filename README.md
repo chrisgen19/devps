@@ -513,7 +513,7 @@ useful row in the table and goes back to meaning what you would guess.
 - **Group RAM totals over-count slightly.** Forked processes share pages that get counted once per process, so `TOTAL` sits a little above `free -h`. Treat the numbers as relative, not exact.
 - **`kill group` is broad by design.** `kill group ai-agent` can target fifty-plus processes. Preview with `-d`.
 - **`-9` skips cleanup.** Next dev servers flush caches on SIGTERM. Try the polite signal first; `devps` only suggests `-9` if something ignored it.
-- **Ports owned by other users show `-` for pid.** Run `sudo devps ports` to see them.
+- **Ports owned by other users show `-` for pid.** `port <n>` and `kill port <n>` say the port is held by another user rather than calling it free. Run `sudo devps ports` to see who. On macOS these come from `netstat`, because `lsof` leaves other users' sockets out entirely.
 - **`idle` costs 300ms.** It takes two snapshots to get a real CPU number, so it is slower than the other one-shot commands by exactly that gap.
 - **Orphan detection looks for ppid 1.** Under a process supervisor or an agent that makes itself a subreaper, an abandoned process is reparented to that instead of to init, and will not be flagged.
 - **`IO/s` only covers your own processes.** `/proc/<pid>/io` needs ptrace access; other users' processes report `-`. The read is skipped entirely for commands that do not show the column.
