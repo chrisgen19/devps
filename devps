@@ -3111,6 +3111,11 @@ ${C_B}REDACTING${C_0}
             api key. DEVPS_REDACT=1 does the same. Worth it before
             pasting output into an issue or a screenshot.
 
+${C_B}CONTAINERS${C_0}
+  With Docker running here, ports, projects and the process tables name
+  the container behind each, and kill stops containers through Docker.
+  DEVPS_DOCKER=0 leaves Docker out.
+
 ${C_B}GROUPS${C_0}
   $(group_legend)
   ${C_DIM}each group keeps its colour in every table${C_0}
