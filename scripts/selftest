@@ -288,17 +288,26 @@ group "docker: a published port names its container"
 # with no pid to show, as docker-proxy's are to anyone but root; 8025 held by a
 # visible forwarder, which is what sudo sees, or Docker Desktop's backend on a
 # Mac; 32855 by an ordinary process that happens to share a published port;
-# and 5432 by another user with no container at all. A throwaway sleep stands
-# in for a process inside ddev-aha-web, so the container has RAM to report.
-docker_fixture > "$dps"
+# and 5432 by another user with no container at all. 8026 is held by
+# rootless Docker's forwarder, and 8080 is published by two containers, on two
+# host addresses. A throwaway sleep stands in for a process inside
+# ddev-aha-web, so the container has RAM to report.
+{ docker_fixture
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(printf '1%.0s' {1..64})" web-a nginx '' '' proja /home/u/a '127.0.0.1:8080->80/tcp' \
+    "$(printf '2%.0s' {1..64})" web-b nginx '' '' projb /home/u/b '127.0.0.2:8080->80/tcp'
+} > "$dps"
 fwd_dir=$(mktemp -d)
 cp "$(command -v sleep)" "$fwd_dir/docker-proxy"
+cp "$(command -v sleep)" "$fwd_dir/rootlesskit"
 "$fwd_dir/docker-proxy" 30 & fwd_pid=$!
+"$fwd_dir/rootlesskit" 30 & rlk_pid=$!
 sleep 30 & plain_pid=$!
 sleep 30 & inner_pid=$!
 printf '%s\n' "/proc/$inner_pid/cgroup:docker-$idw" > "$cgf"
 lsn=$(mktemp)
-printf '%s\t%s\n' 80 '' 5432 '' 8025 "$fwd_pid" 32854 '' 32855 "$plain_pid" > "$lsn"
+printf '%s\t%s\n' 80 '' 5432 '' 8025 "$fwd_pid" 8026 "$rlk_pid" 8080 '' \
+  32854 '' 32855 "$plain_pid" > "$lsn"
 dk() { DEVPS_LISTENERS="$lsn" DEVPS_DOCKER_PS="$dps" DEVPS_CGROUPS="$cgf" "$DEVPS" "$@"; }
 dk_ports=$(dk ports)
 port_row() { printf '%s\n' "$dk_ports" | awk -v p="$1" '$1 == p'; }
@@ -310,7 +319,9 @@ has "and a project's container names the project" \
 same "its RAM is the processes inside it" "$(port_row 32854 | awk '{ print ($3 != "-") }')" 1
 has "a visible forwarder is shown as the container, not itself" \
   "$(port_row 8025)" "[docker] ddev-router 8025/tcp"
+has "and so is rootless Docker's forwarder" "$(port_row 8026)" "[docker] ddev-router 8026/tcp"
 has "an ordinary process on a published port is still itself" "$(port_row 32855)" "sleep 30"
+has "two containers on one port are both counted" "$(port_row 8080)" "web-a 80/tcp (+1 more)"
 has "a port with no container is still another user's" "$(port_row 5432)" "(another user"
 has "DEVPS_DOCKER=0 puts the ports back as they were" \
   "$(DEVPS_DOCKER=0 DEVPS_LISTENERS="$lsn" DEVPS_DOCKER_PS="$dps" "$DEVPS" ports | awk '$1 == 80')" \
@@ -323,6 +334,8 @@ port_out=$(dk port 32854)
 has "a project's container stops with its project" "$port_out" "stop with    : ddev stop aha"
 same "and port lists the processes inside it" \
   "$(printf '%s\n' "$port_out" | awk -v p="$inner_pid" '$1 == p { print "found" }')" found
+same "port names every container on a shared port" \
+  "$(dk port 8080 | awk '/container    :/ { printf "%s ", $3 }')" "web-a web-b "
 
 # -d throughout, so a regression fails the test rather than signalling
 rejects "kill port refuses a container's port" dk kill port 80 -d
@@ -331,8 +344,23 @@ has "and says how to stop the container instead" \
 # the one that matters: the forwarder climbs to dockerd, or is Docker Desktop
 has "kill port never targets the forwarder" \
   "$(dk kill port 8025 -d 2>&1 > /dev/null)" "published by the container ddev-router"
+has "or rootless Docker's, which would take every container with it" \
+  "$(dk kill port 8026 -d 2>&1 > /dev/null)" "published by the container ddev-router"
 has "but still stops an ordinary process that shares a published port" \
   "$(dk kill port 32855 -d)" "$plain_pid"
+kill_out=$(dk kill port 8080 -d 2>&1 > /dev/null)
+has "kill port on a shared port gives a stop for each container" "$kill_out" \
+  "stop web-a with: docker compose -p proja stop"
+has "including the second" "$kill_out" "stop web-b with: docker compose -p projb stop"
+
+# The dashboard needs a terminal, so its keys are checked in the source: in
+# the ports view, X must go through kill port as x does. Through kill pid it
+# would force-stop the forwarder a container's row is showing.
+if [ "$(grep -c 'dash_do_kill port "[$]{VIEW_PORTS\[[$]DASH_SEL\]}"' "$DEVPS")" -ge 2 ]; then
+  pass "the dashboard's x and X both stop a port through kill port"
+else
+  fail "the dashboard's x and X both stop a port through kill port"
+fi
 
 same "each kind of container gets its own clean stop" \
   "$(docker_stop_hint ddev aha x; echo; docker_stop_hint ddev-shared - x; echo
@@ -340,8 +368,8 @@ same "each kind of container gets its own clean stop" \
   "$(printf '%s\n' 'ddev stop aha' 'ddev poweroff  (stops every DDEV project)' \
       'docker compose -p shop stop' 'docker stop scratch')"
 
-kill "$fwd_pid" "$plain_pid" "$inner_pid" 2>/dev/null || true
-wait "$fwd_pid" "$plain_pid" "$inner_pid" 2>/dev/null || true
+kill "$fwd_pid" "$rlk_pid" "$plain_pid" "$inner_pid" 2>/dev/null || true
+wait "$fwd_pid" "$rlk_pid" "$plain_pid" "$inner_pid" 2>/dev/null || true
 rm -rf "$fwd_dir"; rm -f "$dps" "$cgf" "$lsn"
 
 group "project attribution reaches deep working directories"

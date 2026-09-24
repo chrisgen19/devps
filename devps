@@ -721,28 +721,62 @@ container_pids() {
 docker_ready() { [ "$DOCKER_LOADED" = 1 ] || docker_load; }
 
 # The processes that forward a published port into a container. Linux runs a
-# docker-proxy per binding; Docker Desktop on macOS listens in its backend.
-# Either one is plumbing: the port belongs to the container behind it, and
-# signalling the forwarder takes the port - or on a Mac, all of Docker - down.
+# docker-proxy per binding; Docker Desktop on macOS listens in its backend;
+# rootless Docker listens in RootlessKit's port driver - rootlesskit itself,
+# or slirp4netns or pasta, depending on which one it was set up with. Each is
+# plumbing: the port belongs to the container behind it, and signalling the
+# forwarder takes the port down, or on a Mac or under RootlessKit, all of
+# Docker. It is only asked about ports docker ps says a container publishes.
 # Bracketed dots rather than escaped ones, because awk -v would process the
 # backslashes, and the same pattern has to mean the same thing in both.
-DOCKER_FWD_RE='^(docker-proxy|com[.]docker[.]backend)$'
+DOCKER_FWD_RE='^(docker-proxy|com[.]docker[.]backend|rootlesskit|slirp4netns|pasta([.]avx2)?)$'
 is_docker_forwarder() {
   local exe
   exe=$(ps -o args= -p "$1" | awk '{ print $1 }')
   [[ ${exe##*/} =~ $DOCKER_FWD_RE ]]
 }
 
-# "port<TAB>id<TAB>label" for every host port a container publishes, the
-# label being what the ports views print in place of a process
+# "port<TAB>ids<TAB>label" for every host port a container publishes, the
+# label being what the ports views print in place of a process. Two
+# containers can publish one port number on different host addresses, and
+# listeners reports ports, not addresses, so both go on the one row: ids is
+# comma separated, and the label names the first and counts the rest.
 docker_port_labels() {
   { docker_snap | sed 's/^/D\t/'; docker_ports | sed 's/^/P\t/'; } |
     awk -F'\t' -v HOME="$HOME" '
       $1 == "D" { name[$2] = $3; kind[$2] = $5; root[$2] = $7; next }
       $1 == "P" && ($3 in name) {
+        if ($2 in ids) { ids[$2] = ids[$2] "," $3; more[$2]++; next }
         r = root[$3]; sub("^" HOME "/", "~/", r)
-        where = (kind[$3] == "ddev-shared") ? "(DDEV shared)" : (r == "-" ? "" : r)
-        printf "%s\t%s\t%s %s%s\n", $2, $3, name[$3], $4, (where == "" ? "" : "  " where) }'
+        where[$2] = (kind[$3] == "ddev-shared") ? "(DDEV shared)" : (r == "-" ? "" : r)
+        order[++n] = $2; ids[$2] = $3; first[$2] = name[$3] " " $4
+      }
+      END {
+        for (i = 1; i <= n; i++) {
+          p = order[i]
+          printf "%s\t%s\t%s%s%s\n", p, ids[p], first[p],
+            (more[p] ? " (+" more[p] " more)" : ""), (where[p] == "" ? "" : "  " where[p])
+        }
+      }'
+}
+
+# Why kill port will not touch a container's port, and what stops it instead:
+# one stop command per container, since each may need a different one
+docker_refusal() {  # <port> <comma separated ids>
+  local id name kind proj hint="" stops="" n=0
+  for id in ${2//,/ }; do
+    IFS=$'\t' read -r _ name _ kind proj _ < <(docker_snap | awk -F'\t' -v id="$id" '$1 == id')
+    hint=$(docker_stop_hint "$kind" "$proj" "$name")
+    stops+=$'\n'"       stop $name with: $hint"
+    n=$(( n + 1 ))
+  done
+  if [ "$n" -eq 1 ]; then
+    printf 'port %s is published by the container %s - %s does not signal container processes.\n       stop it with: %s' \
+      "$1" "$name" "$PROG" "$hint"
+  else
+    printf 'port %s is published by %d containers - %s does not signal container processes.%s' \
+      "$1" "$n" "$PROG" "$stops"
+  fi
 }
 
 # "id<TAB>rss<TAB>procs" for each container whose processes this kernel can
@@ -1081,7 +1115,9 @@ ports_table() {
   while IFS=$'\t' read -r port pid; do
     rss=""; args=""
     if [ -n "${dlabel[$port]:-}" ] && { [ -z "$pid" ] || is_docker_forwarder "$pid"; }; then
-      rss=${drss[${did[$port]}]:-}
+      for id in ${did[$port]//,/ }; do
+        [ -n "${drss[$id]:-}" ] && rss=$(( ${rss:-0} + ${drss[$id]} ))
+      done
       args="${C_C}[docker]${C_0} ${dlabel[$port]:0:49}"
     elif [ -z "$pid" ]; then
       args="${C_DIM}(another user - run: sudo $PROG ports)${C_0}"
@@ -1196,18 +1232,14 @@ kill_cmd() {
       # dockerd, or on a Mac by Docker Desktop's own backend. Neither is the
       # thing to stop, so they are dropped, and a port with nothing else on it
       # is pointed at the command that stops the container instead.
-      local dport dname dkind dproj
+      local dids
       local -a kept=()
       docker_ready
-      dport=$(docker_port_labels | awk -F'\t' -v p="$target" '$1 == p { print $2; exit }')
-      if [ -n "$dport" ]; then
+      dids=$(docker_port_labels | awk -F'\t' -v p="$target" '$1 == p { print $2; exit }')
+      if [ -n "$dids" ]; then
         for r in ${roots[@]+"${roots[@]}"}; do is_docker_forwarder "$r" || kept+=("$r"); done
         roots=(${kept[@]+"${kept[@]}"})
-        if [ "${#roots[@]}" -eq 0 ]; then
-          IFS=$'\t' read -r _ dname _ dkind dproj _ < <(docker_snap | awk -F'\t' -v id="$dport" '$1 == id')
-          die "port $target is published by the container $dname - $PROG does not signal container processes.
-       stop it with: $(docker_stop_hint "$dkind" "$dproj" "$dname")"
-        fi
+        [ "${#roots[@]}" -gt 0 ] || die "$(docker_refusal "$target" "$dids")"
       fi
       if [ "${#roots[@]}" -eq 0 ]; then
         # Points at a read, never at "sudo kill": climbing from a root-owned
@@ -1404,10 +1436,9 @@ idle_cmd() {
 
 # A published port, told as its container. Its forwarder is no answer: the
 # climb from docker-proxy ends at dockerd, with every container under it.
-port_container() {  # <port> <id> <container port/proto>
-  local port=$1 id=$2 cport=$3 name image kind proj root pids
+port_container() {  # <id> <container port/proto>
+  local id=$1 cport=$2 name image kind proj root pids
   IFS=$'\t' read -r _ name image kind proj root _ < <(docker_snap | awk -F'\t' -v id="$id" '$1 == id')
-  printf '%sPORT %s%s\n' "$C_B" "$port" "$C_0"
   printf '  container    : %s  %s%s%s\n' "$name" "$C_DIM" "$image" "$C_0"
   printf '  forwards to  : %s inside it\n' "$cport"
   printf '  project      : %s\n' "$(docker_where "$kind" "$proj" "$root")"
@@ -1424,14 +1455,18 @@ port_container() {  # <port> <id> <container port/proto>
 }
 
 port_cmd() {
-  local port="$1" pid root dport
+  local port="$1" pid root dports line
+  local -a dlines=()
   case "$port" in *[!0-9]*) die "port must be a number" ;; esac
   pid=$(listeners |
     awk -F'\t' -v p="$port" '$1 == p && $2 != "" { print $2 }' | sort -u | head -1)
   docker_ready
-  dport=$(docker_ports | awk -F'\t' -v p="$port" '$1 == p { print $2 "\t" $3; exit }')
-  if [ -n "$dport" ] && { [ -z "$pid" ] || is_docker_forwarder "$pid"; }; then
-    port_container "$port" "${dport%%$'\t'*}" "${dport#*$'\t'}"
+  # every container on the port: two can publish one number on two addresses
+  dports=$(docker_ports | awk -F'\t' -v p="$port" '$1 == p { print $2 "\t" $3 }')
+  if [ -n "$dports" ] && { [ -z "$pid" ] || is_docker_forwarder "$pid"; }; then
+    printf '%sPORT %s%s\n' "$C_B" "$port" "$C_0"
+    mapfile -t dlines <<< "$dports"
+    for line in "${dlines[@]}"; do port_container "${line%%$'\t'*}" "${line#*$'\t'}"; done
     return
   fi
   if [ -z "$pid" ]; then
@@ -1795,9 +1830,10 @@ dash_port_fmt() {
     $1 == "P" {
       pid = $3
       if (($2 in lab) && (pid == "" || ((pid in args) && fwd(args[pid])))) {
-        id = lid[$2]
         cmd = CC "[docker]" C0 " " substr(lab[$2], 1, W - 51)
-        ram = (id in cin) ? hum(crss[id]) : "-"; c = (id in cin) ? ccpu[id] : 0
+        r = 0; c = 0; seen = 0; k = split(lid[$2], ids, ",")
+        for (j = 1; j <= k; j++) if (ids[j] in cin) { r += crss[ids[j]]; c += ccpu[ids[j]]; seen = 1 }
+        ram = seen ? hum(r) : "-"
       } else {
         cmd = (pid in args) ? shorten(args[pid], W - 42) \
             : (pid == "" ? ("(another user - run: sudo " PROG " ports)") : "(exited)")
@@ -2224,7 +2260,12 @@ dash_keys() {
              elif pid=$(dash_selected_pid); then
                dash_shell_out dash_do_kill pid "$pid"
              else DASH_MSG="${C_Y}nothing selected${C_0}"; fi ;;
-    X)       if pid=$(dash_selected_pid); then dash_shell_out dash_do_kill pid "$pid" -9
+    # the ports view goes through kill port for X as it does for x: a row can
+    # be a container whose visible pid is its forwarder, and only kill port
+    # knows not to signal that
+    X)       if [ "$DASH_VIEW" = ports ] && [ "${#VIEW_PORTS[@]}" -gt "$DASH_SEL" ]; then
+               dash_shell_out dash_do_kill port "${VIEW_PORTS[$DASH_SEL]}" -9
+             elif pid=$(dash_selected_pid); then dash_shell_out dash_do_kill pid "$pid" -9
              else DASH_MSG="${C_Y}nothing selected${C_0}"; fi ;;
   esac
   [ "$DASH_SEL" -ge "${#VIEW_ROWS[@]}" ] && DASH_SEL=$(( ${#VIEW_ROWS[@]} - 1 ))
