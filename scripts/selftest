@@ -263,17 +263,28 @@ same "nor are a tcp daemon's on another host" "$(rows_via tcp://10.0.0.5:2376)" 
 same "a local socket and loopback tcp still count" \
   "$(rows_via unix:///var/run/docker.sock; rows_via tcp://127.0.0.1:2375; rows_via tcp://localhost:2375)" \
   "$(printf '5\n5\n5')"
-# a named context is looked up; a stand-in docker answers for the endpoint
+# A named context is looked up. A stand-in docker plays the CLI: it answers
+# with the endpoint it resolved, or fails when told to.
 fake_bin=$(mktemp -d)
 # shellcheck disable=SC2016  # written into the stand-in, which expands it
-printf '#!/bin/sh\necho "$FAKE_ENDPOINT"\n' > "$fake_bin/docker"
+printf '#!/bin/sh\n[ "$FAKE_ENDPOINT" = fail ] && exit 1\necho "$FAKE_ENDPOINT"\n' > "$fake_bin/docker"
 chmod +x "$fake_bin/docker"
-ctx_rows() {
+ctx_rows() {  # <endpoint the CLI resolves> [DOCKER_HOST]
   ( export PATH="$fake_bin:$PATH" DOCKER_CONTEXT=prod FAKE_ENDPOINT=$1
-    unset DOCKER_HOST; DEVPS_DOCKER_PS="$dps" docker_rows ) | awk 'END { print NR }'
+    if [ -n "${2:-}" ]; then export DOCKER_HOST=$2; else unset DOCKER_HOST; fi
+    DEVPS_DOCKER_PS="$dps" docker_rows ) | awk 'END { print NR }'
 }
 same "a context pointing at another host is remote" "$(ctx_rows ssh://deploy@build.example.com)" 0
 same "a context on a local socket is not" "$(ctx_rows unix:///run/user/1000/docker.sock)" 5
+# With DOCKER_HOST and DOCKER_CONTEXT both set, the docs and the CLI disagree
+# on which wins, so devps takes the CLI's answer in either direction.
+same "with both set, a remote answer from the CLI is remote" \
+  "$(ctx_rows ssh://deploy@build.example.com unix:///var/run/docker.sock)" 0
+same "and a local answer is local" \
+  "$(ctx_rows unix:///var/run/docker.sock ssh://deploy@build.example.com)" 5
+same "a CLI that cannot answer leaves DOCKER_HOST standing" \
+  "$(ctx_rows fail ssh://deploy@build.example.com)" 0
+same "and so does one that answers with nothing" "$(ctx_rows '' ssh://deploy@build.example.com)" 0
 rm -rf "$fake_bin"
 
 # last, because it empties the fixture to prove nothing re-reads it

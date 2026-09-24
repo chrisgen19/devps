@@ -676,10 +676,17 @@ AWKCGROUP='
 # would label the wrong sockets, and over ssh every command would pay for the
 # round trip. With no DOCKER_HOST and no context chosen the CLI uses the local
 # default socket, so the common case is decided without asking anything.
+#
+# Once DOCKER_CONTEXT is set, the CLI is asked which endpoint it resolved
+# rather than devps deciding: Docker's documentation says the context
+# overrides DOCKER_HOST, while the CLI itself (29.8) lets DOCKER_HOST win.
+# docker context inspect answers with whichever rule the installed CLI keeps.
+# If it cannot answer, DOCKER_HOST stands.
 docker_is_local() {
-  local host=${DOCKER_HOST:-} cfg=${DOCKER_CONFIG:-$HOME/.docker}/config.json
-  if [ -z "$host" ] && { [ -n "${DOCKER_CONTEXT:-}" ] || grep -q '"currentContext"' "$cfg" 2> /dev/null; }; then
-    host=$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2> /dev/null)
+  local host=${DOCKER_HOST:-} cfg=${DOCKER_CONFIG:-$HOME/.docker}/config.json resolved
+  if [ -n "${DOCKER_CONTEXT:-}" ] || { [ -z "$host" ] && grep -q '"currentContext"' "$cfg" 2> /dev/null; }; then
+    resolved=$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2> /dev/null) &&
+      host=${resolved:-$host}
   fi
   case "$host" in
     ""|unix://*|npipe://*) return 0 ;;
