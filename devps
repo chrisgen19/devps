@@ -543,7 +543,20 @@ listeners_darwin() {
            if (a[k] ~ /^[0-9]+$/) printf "%s\t%s\n", a[k], pid }'
 }
 
-listeners() { "listeners_$DP_PLATFORM" | sort -n -u; }
+# DEVPS_LISTENERS points the reader at a fixture of the same port<TAB>pid
+# lines, so another user's socket is testable on a runner that has none open
+listeners() {
+  if [ -n "${DEVPS_LISTENERS:-}" ]; then cat "$DEVPS_LISTENERS"; else "listeners_$DP_PLATFORM"; fi |
+    sort -n -u
+}
+
+# Is port n bound by a socket whose pid this user cannot see. ss lists another
+# user's socket with the pid withheld, and the lookups below skip pid-less rows,
+# so without this check a taken port reads as a free one. Darwin leaves such
+# sockets out entirely, so there this never answers yes.
+port_held_by_other() {
+  listeners | awk -F'\t' -v p="$1" '$1 == p && $2 == "" { f = 1 } END { exit !f }'
+}
 
 # a process's working directory, or empty when it cannot be read
 proc_cwd_linux()  { readlink "/proc/$1/cwd"; }
@@ -953,7 +966,14 @@ kill_cmd() {
       case "$target" in *[!0-9]*) die "port must be a number" ;; esac
       mapfile -t roots < <(listeners |
         awk -F'\t' -v p="$target" '$1 == p && $2 != "" { print $2 }' | sort -u)
-      [ "${#roots[@]}" -gt 0 ] || die "nothing is listening on port $target (try: $PROG ports)"
+      if [ "${#roots[@]}" -eq 0 ]; then
+        # Points at a read, never at "sudo kill": climbing from a root-owned
+        # listener stops at whatever pid 1 started, and for a Docker port that
+        # is dockerd itself, with every container under it.
+        port_held_by_other "$target" &&
+          die "port $target is held by another user - not yours to stop (see who: sudo $PROG port $target)"
+        die "nothing is listening on port $target (try: $PROG ports)"
+      fi
       for r in "${roots[@]}"; do climbed+=("$(climb "$r")"); done
       mapfile -t roots < <(printf '%s\n' "${climbed[@]}" | sort -u)
       ;;
@@ -1144,7 +1164,11 @@ port_cmd() {
   case "$port" in *[!0-9]*) die "port must be a number" ;; esac
   pid=$(listeners |
     awk -F'\t' -v p="$port" '$1 == p && $2 != "" { print $2 }' | sort -u | head -1)
-  [ -n "$pid" ] || die "nothing listening on port $port (try: $PROG ports)"
+  if [ -z "$pid" ]; then
+    port_held_by_other "$port" &&
+      die "port $port is held by another user (try: sudo $PROG port $port)"
+    die "nothing listening on port $port (try: $PROG ports)"
+  fi
   build_protected
   root=$(climb "$pid")
   printf '%sPORT %s%s\n' "$C_B" "$port" "$C_0"

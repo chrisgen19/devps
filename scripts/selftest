@@ -94,6 +94,33 @@ case "$psiout" in
 esac
 rm -rf "$psidir"
 
+group "a port held by another user is not reported free"
+# ss withholds the pid of another user's socket, and port and kill port used to
+# skip those rows before looking, so a taken port read as a free one. A runner
+# has no other user's port open, so a fixture stands in: 80 held, 81 free.
+lsn=$(mktemp)
+printf '80\t\n' > "$lsn"
+rejects "port on a held port still fails" env DEVPS_LISTENERS="$lsn" "$DEVPS" port 80
+held_err=$(DEVPS_LISTENERS="$lsn" "$DEVPS" port 80 2>&1 > /dev/null)
+case "$held_err" in
+  *"held by another user"*) pass "port names the other user instead of calling it free" ;;
+  *) fail "port names the other user instead of calling it free (got: $held_err)" ;;
+esac
+free_err=$(DEVPS_LISTENERS="$lsn" "$DEVPS" port 81 2>&1 > /dev/null)
+case "$free_err" in
+  *"nothing listening"*) pass "a port nobody holds is still reported free" ;;
+  *) fail "a port nobody holds is still reported free (got: $free_err)" ;;
+esac
+# -d as well, so a regression here fails the test rather than signalling
+rejects "kill port on a held port still fails" \
+  env DEVPS_LISTENERS="$lsn" "$DEVPS" kill port 80 -d
+held_err=$(DEVPS_LISTENERS="$lsn" "$DEVPS" kill port 80 -d 2>&1 > /dev/null)
+case "$held_err" in
+  *"not yours to stop"*) pass "kill port says the port is taken, not free" ;;
+  *) fail "kill port says the port is taken, not free (got: $held_err)" ;;
+esac
+rm -f "$lsn"
+
 group "project attribution reaches deep working directories"
 # a pnpm store or a monorepo package can sit a dozen levels under its own root;
 # a process started down there still belongs to the project
