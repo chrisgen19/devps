@@ -46,7 +46,7 @@ group "dependencies"
 for t in ps pgrep awk; do
   if command -v "$t" > /dev/null; then pass "$t present"; else fail "$t missing"; fi
 done
-if [ "$PLAT" = Linux ]; then deps="ss"; else deps="sysctl vm_stat lsof"; fi
+if [ "$PLAT" = Linux ]; then deps="ss"; else deps="sysctl vm_stat lsof netstat"; fi
 for t in $deps; do
   if command -v "$t" > /dev/null; then pass "$t present"; else fail "$t missing"; fi
 done
@@ -120,6 +120,62 @@ case "$held_err" in
   *) fail "kill port says the port is taken, not free (got: $held_err)" ;;
 esac
 rm -f "$lsn"
+
+group "macOS: a port only netstat can see is held, not free"
+# lsof leaves another user's sockets out entirely, so the Darwin reader merges
+# in netstat, which lists every listening socket but names no pid. Drive the
+# real merge out of the script against captured netstat output, so this runs on
+# every platform: 3000 is lsof's, 80, 5432 and 8080 only netstat saw, and an
+# established connection is not a listener.
+eval "$(sed -n "/^AWKDARWINPORTS='/,/^'$/p" "$DEVPS")"
+darwin_ports=$(printf '%s\n' \
+  $'L\t3000\t123' \
+  'Active Internet connections (including servers)' \
+  'Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)' \
+  'tcp4       0      0  127.0.0.1.3000         *.*                    LISTEN' \
+  'tcp46      0      0  *.80                   *.*                    LISTEN' \
+  'tcp6       0      0  ::1.5432               *.*                    LISTEN' \
+  'tcp6       0      0  fe80::1%lo0.8080       *.*                    LISTEN' \
+  'tcp4       0      0  192.168.1.5.52345      17.57.144.1.5223       ESTABLISHED' |
+  awk "$AWKDARWINPORTS" | sort -n)
+want_ports=$(printf '80\t\n3000\t123\n5432\t\n8080\t\n')
+if [ "$darwin_ports" = "$want_ports" ]; then
+  pass "netstat-only ports become pid-less rows, lsof's keep their pid"
+else
+  fail "netstat-only ports become pid-less rows, lsof's keep their pid (got: $(printf '%s' "$darwin_ports" | tr '\t\n' ':,'))"
+fi
+
+# The fixture pins the format; this proves a real Mac still prints it. A
+# listener this script owns must come back from the real netstat, and must be
+# reported once, with its pid - not a second time as someone else's.
+if [ "$PLAT" != Darwin ]; then
+  skip "real netstat parses (macOS only)"
+elif ! command -v python3 > /dev/null; then
+  skip "real netstat parses (no python3 to open a listener)"
+else
+  portfile=$(mktemp)
+  python3 -c 'import socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(1)
+open(sys.argv[1], "w").write(str(s.getsockname()[1])); time.sleep(20)' "$portfile" &
+  lpid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$portfile" ] && break; sleep 0.5; done
+  lport=$(cat "$portfile")
+  ns_ports=$(netstat -an -p tcp | awk "$AWKDARWINPORTS")
+  case $'\n'"$ns_ports"$'\n' in
+    *$'\n'"$lport"$'\t\n'*) pass "the real netstat output parses (port $lport)" ;;
+    *) fail "the real netstat output parses (port $lport not found)" ;;
+  esac
+  if "$DEVPS" ports | awk -v p="$lport" -v pid="$lpid" '
+       $1 == p && $2 == pid { own = 1 } $1 == p && $2 == "-" { dup = 1 }
+       END { exit !(own && !dup) }'; then
+    pass "a listener lsof can attribute is not also reported held"
+  else
+    fail "a listener lsof can attribute is not also reported held"
+  fi
+  kill "$lpid" 2>/dev/null || true
+  wait "$lpid" 2>/dev/null || true
+  rm -f "$portfile"
+fi
 
 group "project attribution reaches deep working directories"
 # a pnpm store or a monorepo package can sit a dozen levels under its own root;

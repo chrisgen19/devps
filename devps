@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # devps - see what your dev machine is running, what it costs, and stop it safely.
-# Linux and WSL2 read /proc; macOS reads sysctl, vm_stat and lsof.
+# Linux and WSL2 read /proc; macOS reads sysctl, vm_stat, lsof and netstat.
 # Dependencies: bash 4+, ps, pgrep, awk, and iproute2 (Linux) or lsof (macOS).
 #
 # Formerly wslps. Invoked under either name: PROG is what the user typed, so a
@@ -533,14 +533,37 @@ listeners_linux() {
 
 # lsof field output rather than its columns: -Fpn emits one p<pid> line per
 # process followed by an n<addr:port> line per socket, which survives command
-# names containing spaces. Sockets owned by another user are simply absent
-# without privileges, where ss lists them with no pid - so the "another user"
-# hint in the ports table is Linux only, not wrong here.
+# names containing spaces.
+#
+# Without privileges lsof leaves another user's sockets out entirely, where ss
+# lists them with the pid withheld. Taken alone, a port root holds would read
+# as free. netstat lists every listening socket whoever owns it, but names no
+# pid, so the two are merged: lsof's rows as they are, then a pid-less row for
+# each port only netstat saw - the shape ss gives on Linux. The merge is per
+# port, not per socket: a port with any row lsof could attribute is not also
+# reported as held by someone else.
+#
+# The lsof rows arrive tagged L; everything else is raw netstat -an, which
+# prints an address as host.port - "*.80", "127.0.0.1.8080", "::1.5432" - so
+# the port is whatever follows the last dot.
+# shellcheck disable=SC2016  # an awk program: $1 and friends are its fields
+AWKDARWINPORTS='
+  $1 == "L" { own[$2] = 1; printf "%s\t%s\n", $2, $3; next }
+  $1 ~ /^tcp/ && $6 == "LISTEN" {
+    p = $4; sub(/^.*\./, "", p)
+    if (p ~ /^[0-9]+$/) seen[p] = 1
+  }
+  END { for (p in seen) if (!(p in own)) printf "%s\t\n", p }
+'
+
 listeners_darwin() {
-  lsof -w -nP -iTCP -sTCP:LISTEN -Fpn | awk '
-    /^p/ { pid = substr($0, 2); next }
-    /^n/ { n = substr($0, 2); k = split(n, a, ":")
-           if (a[k] ~ /^[0-9]+$/) printf "%s\t%s\n", a[k], pid }'
+  {
+    lsof -w -nP -iTCP -sTCP:LISTEN -Fpn | awk '
+      /^p/ { pid = substr($0, 2); next }
+      /^n/ { n = substr($0, 2); k = split(n, a, ":")
+             if (a[k] ~ /^[0-9]+$/) printf "L\t%s\t%s\n", a[k], pid }'
+    netstat -an -p tcp
+  } | awk "$AWKDARWINPORTS"
 }
 
 # DEVPS_LISTENERS points the reader at a fixture of the same port<TAB>pid
@@ -550,10 +573,9 @@ listeners() {
     sort -n -u
 }
 
-# Is port n bound by a socket whose pid this user cannot see. ss lists another
-# user's socket with the pid withheld, and the lookups below skip pid-less rows,
-# so without this check a taken port reads as a free one. Darwin leaves such
-# sockets out entirely, so there this never answers yes.
+# Is port n bound by a socket whose pid this user cannot see. Both readers
+# report another user's socket as a pid-less row, and the lookups below skip
+# those rows, so without this check a taken port reads as a free one.
 port_held_by_other() {
   listeners | awk -F'\t' -v p="$1" '$1 == p && $2 == "" { f = 1 } END { exit !f }'
 }
