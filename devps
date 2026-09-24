@@ -202,15 +202,22 @@ function gcol(g) {
 # "[container] " ahead of the command of a process that runs in one, from
 # CMAP (pid=name|pid=name|...), so a mysqld in a DDEV project reads as that
 # project, not as a stray database. Empty for everything else, and for every
-# caller that passes no CMAP.
-function ctag(pid) {
+# caller that passes no CMAP. room is the most the tag may take: a longer
+# name is cut to fit ("[ddev-accessind...] "), so the tag can never push the
+# command, and the row, past its column. Too little room for a name and the
+# brackets means no tag at all.
+function ctag(pid, room,   t, n) {
   if (!ct_ready) {
     ct_ready = 1
     ct_n = split(CMAP, ct_a, "|")
     for (ct_i = 1; ct_i <= ct_n; ct_i++)
       if (split(ct_a[ct_i], ct_b, "=") == 2) CT[ct_b[1]] = ct_b[2]
   }
-  return (pid in CT) ? "[" CT[pid] "] " : ""
+  if (!(pid in CT)) return ""
+  t = "[" CT[pid] "] "
+  if (room == "" || length(t) <= room) return t
+  n = room - 6
+  return (n < 1) ? "" : "[" substr(CT[pid], 1, n) "...] "
 }
 # Mask secrets in a command line when DEVPS_REDACT is set. Read from the
 # environment rather than passed in, so the nine call sites do not each need
@@ -955,6 +962,11 @@ hum_kb() { awk "$AWKLIB"' BEGIN { print hum(ARGV[1]) }' "$1"; }
 # snapshot. These three read ps straight into a printf, so they filter here.
 redact_line() { awk "$AWKLIB"'{ print redact($0) }'; }
 
+# tagged <tag>: prefix each line of stdin with the tag and a tab, so several
+# streams can be merged into one awk that tells them apart by $1. Not sed:
+# BSD sed has not always read \t in a replacement as a tab.
+tagged() { awk -v t="$1" '{ print t "\t" $0 }'; }
+
 # snapshot -> TSV, rss desc:
 #   1 pid  2 rss_kb  3 swap_kb  4 etimes  5 pcpu  6 group  7 args
 #   8 cputicks  9 ppid  10 io_bytes
@@ -962,11 +974,6 @@ redact_line() { awk "$AWKLIB"'{ print redact($0) }'; }
 # snapshots and divides by the time between them.
 DP_IO=0        # reading /proc/<pid>/io for every process is a third of the
                # snapshot's cost, so only the callers that show it opt in
-# tagged <tag>: prefix each line of stdin with the tag and a tab, so several
-# streams can be merged into one awk that tells them apart by $1. Not sed:
-# BSD sed has not always read \t in a replacement as a tab.
-tagged() { awk -v t="$1" '{ print t "\t" $0 }'; }
-
 snapshot() { "snapshot_$DP_PLATFORM"; }
 
 snapshot_linux() {
@@ -1180,8 +1187,9 @@ proc_table() {
   }
   {
     sw = ($3 > 0 ? hum($3) : "-")
-    t = ctag($1); w = (SHOWG ? 58 : 66) - length(t); if (w < 20) w = 20
-    cmd = (t == "" ? "" : CC t C0) shorten($7, w)
+    # the command keeps 20 columns; the tag gets what is left of the column
+    cw = (SHOWG ? 58 : 66); t = ctag($1, cw - 20)
+    cmd = (t == "" ? "" : CC t C0) shorten($7, cw - length(t))
     if (SHOWG) printf "  %7s %8s %8s  %s%-11s%s %8s  %s\n", $1, hum($2), sw,
                       gcol($6), $6, C0, dur($4), cmd
     else       printf "  %7s %8s %8s %8s  %s\n",        $1, hum($2), sw, dur($4), cmd
@@ -1518,10 +1526,10 @@ idle_cmd() {
     -v CC="$C_C" -v CMAP="$cmap" "$AWKLIB"'
     BEGIN { printf "  %7s %8s %8s %7s %8s  %-11s %s\n",
                    "PID","RAM","SWAP","CPU%","UPTIME","WHY","COMMAND" }
-    { t = ctag($1); w = 44 - length(t); if (w < 16) w = 16
+    { t = ctag($1, 44 - 16)
       printf "  %7s %8s %8s %6.1f%% %8s  %s%-11s%s %s%s\n", $1, hum($2), ($3 > 0 ? hum($3) : "-"),
              $11, dur($4), ($14 ~ /orphan/ ? CR : CY), $14, C0,
-             (t == "" ? "" : CC t C0), shorten($7, w)
+             (t == "" ? "" : CC t C0), shorten($7, 44 - length(t))
       r += $2; s += $3; n++ }
     END { printf "  %sstopping all %d would return %s RAM and %s swap%s\n", CD, n, hum(r), hum(s), C0 }'
   echo
@@ -1879,8 +1887,11 @@ dash_fmt_proc() {
       # the idle view answers "why is this here", every other view "what is it"
       tag  = (WHY != "") ? f[14] : f[6]
       tagc = (WHY == "") ? gcol(f[6]) : (f[14] ~ /orphan/ ? CR : CY)
-      ct   = ctag(f[1]); w = cmdw - length(ct); if (w < 12) w = 12
-      cmd  = (ct == "" ? "" : CC ct C0) shorten(f[7], w)
+      # the dashboard paints rows as they are, so a row wider than the
+      # terminal wraps into the next: the command keeps 12, the tag gets
+      # the rest of the column and is cut to fit
+      ct   = ctag(f[1], cmdw - 12)
+      cmd  = (ct == "" ? "" : CC ct C0) shorten(f[7], cmdw - length(ct))
       if (wide)
         printf "%s%7s%s %s%8s%s %s%s%s %s%7s%s %s%5.1f%%%s %s%8s%s %s%8s%s %s%-10s%s %s\n",
           pc, f[1], C0, rc, hum(f[2]), C0, rc, micro(f[2], mx, 8), C0,

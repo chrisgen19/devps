@@ -405,6 +405,28 @@ eval "$(sed -n "/^AWKLIB='/,/^'$/p" "$DEVPS")"
 same "ctag names the container for its own pids and nothing else" \
   "$(awk -v CMAP="4242=web-a|4343=web-b|" "$AWKLIB"'
        BEGIN { printf "%s|%s|%s", ctag(4242), ctag(4343), ctag(1) }')" "[web-a] |[web-b] |"
+# given the room it may take, a long name is cut to exactly that, a short one
+# is left alone, and with no room for a name there is no tag
+same "ctag cuts a long name to its room, and gives up when there is none" \
+  "$(awk -v CMAP="4242=ddev-accessindigenous-website-web|4343=web-a|" "$AWKLIB"'
+       BEGIN { t = ctag(4242, 20); printf "%s(%d)|%s|%s", t, length(t), ctag(4343, 20), ctag(4242, 5) }')" \
+  "[ddev-accessind...] (20)|[web-a] |"
+
+# The dashboard paints rows as they are, so one wider than the terminal wraps
+# into the next and corrupts it. Drive its row formatter at 80 columns with a
+# long container name: the row has to leave the two columns the pointer takes,
+# and the tag has to be cut rather than dropped.
+eval "$(sed -n '/^dash_fmt_proc()/,/^}/p' "$DEVPS")"
+# shellcheck disable=SC2034  # all read by dash_fmt_proc, which arrives by eval
+dash_row=$(
+  TCOLS=80 C_DIM='' C_0='' C_R='' C_Y='' C_G='' C_NEW='' C_C='' GCOLS_STR='' BAR_EMPTY=.
+  BLK=('#' '#' '#' '#' '#' '#' '#' '#')
+  DASH_CMAP="4242=ddev-accessindigenous-website-web|"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    4242 1677721 0 17820 0.0 dev-server 'next-server (v15.5.12)' 0 1 0 0.0 0 0 | dash_fmt_proc)
+same "a long container name keeps a dashboard row inside 80 columns" \
+  "$([ "${#dash_row}" -le 78 ] && echo fits || echo "${#dash_row} columns")" fits
+has "and the tag is cut to fit, not dropped" "$dash_row" "[ddev-acc...] next-"
 
 same "each kind of container gets its own clean stop" \
   "$(docker_stop_hint ddev aha x; echo; docker_stop_hint ddev-shared - x; echo
