@@ -695,7 +695,13 @@ if [ "$PLAT" = Linux ]; then want_label="WSL RESOURCES"; else want_label="MACOS 
 if [ -z "$TIMEOUT" ]; then
   skip "dash falls back to a plain report over a pipe (no timeout(1))"
 else
-  dash_out=$($TIMEOUT 3 "$DEVPS" dash 1 | head -3) || true
+  # The run ends at the first write after head has its three lines: one
+  # interval and one report after the first, about two seconds on an idle
+  # machine whatever the timeout says. So the timeout is a ceiling for a dash
+  # that hangs, not a budget for the report. At three seconds it was both, and
+  # a loaded machine, where a report can take three seconds on its own, failed
+  # a dash that was working.
+  dash_out=$($TIMEOUT 10 "$DEVPS" dash 1 | head -3) || true
   if printf '%s' "$dash_out" | grep -q "$want_label"; then
     pass "dash falls back to a plain report over a pipe"
   else
