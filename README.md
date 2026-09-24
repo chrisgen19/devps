@@ -119,6 +119,7 @@ your dev server will not bind.
 | `projects` | yes | yes |
 | `--redact` | yes | yes |
 | `doctor` | WSL2 only | not applicable |
+| Containers (Docker, DDEV) | native Docker: yes, with each container's RAM; Docker Desktop: ports and projects, no per-container RAM | Docker Desktop: ports and projects, no per-container RAM |
 
 Where a number cannot be read honestly it is reported as absent rather than
 estimated: on macOS the `SWAP` column reads `-` on every row rather than a
@@ -176,7 +177,7 @@ ln -s ~/.local/bin/devps ~/.local/bin/wslps
 | `devps doctor` | Whether this WSL box is configured to survive your work (WSL2 only) |
 | `devps group <name>` | Every process in one group |
 | `devps ports` | Everything listening |
-| `devps port <n>` | Who owns port n, its project dir, its tree |
+| `devps port <n>` | Who owns port n (a process or a container), and where it lives |
 | `devps tree <pid>` | Process tree under a pid |
 | `devps dash [secs]` | Live interactive dashboard, `q` to quit (default 2) |
 | `devps watch [secs]` | Alias for `dash` |
@@ -186,12 +187,12 @@ ln -s ~/.local/bin/devps ~/.local/bin/wslps
 
 | Command | What it does |
 | --- | --- |
-| `devps kill port <n>` | Stop whatever serves port n, plus its children |
+| `devps kill port <n>` | Stop what serves port n: a process and its children, or its container |
 | `devps kill pid <n>` | Stop one process plus its children |
 | `devps kill group <name>` | Stop every process in a group |
-| `devps kill project <name>` | Stop everything running in one project |
+| `devps kill project <name>` | Stop everything running in one project, its containers included |
 
-Flags: `-y` skip confirmation, `-9` SIGKILL instead of SIGTERM, `-d` dry run.
+Flags: `-y` skip confirmation, `-9` SIGKILL instead of SIGTERM (`docker kill` for a container), `-d` dry run.
 
 ## The useful bits
 
@@ -314,7 +315,8 @@ PROJECTS (processes grouped by the project directory they run in)
 ```
 
 Every process is attributed to the directory it was started in, walked up to
-the nearest `.git`, `package.json`, `go.mod`, `Cargo.toml` or `composer.json`.
+the nearest `.git`, `package.json`, `go.mod`, `Cargo.toml`, `composer.json` or
+`.ddev/config.yaml`.
 The five node processes behind one dev server collapse onto one row, with the
 port it serves next to it.
 
@@ -323,8 +325,12 @@ whose working directory has no project marker above it; `(cwd not readable)` is
 another user's process, which the kernel will not let you inspect. Neither is
 guessed at.
 
-`devps kill project <name>` stops everything in one checkout, with the same
-preview, confirmation and guards as every other kill.
+A process inside a container is attributed through its container instead, to
+the project DDEV or Compose says it belongs to; see
+[Docker and DDEV](#docker-and-ddev).
+
+`devps kill project <name>` stops everything in one checkout, its containers
+included, with the same preview, confirmation and guards as every other kill.
 
 ### `devps doctor` checks the box, not the processes
 
@@ -451,6 +457,115 @@ Guard 3 matters more than it looks. Without it, `kill pid 1` would skip init and
 
 Use `-d` first when you are unsure. The preview is the safety net.
 
+## Docker and DDEV
+
+When Docker runs on this machine, devps reads its containers too. A DDEV site
+shows up as the project it is, not as a wall of root-owned ports:
+
+```
+$ devps ports
+     PORT      PID      RAM  PROCESS
+       80        -    96.8M  [docker] ddev-router 80/tcp  (DDEV shared)
+      443        -    96.8M  [docker] ddev-router 443/tcp  (DDEV shared)
+     5432        -        -  (another user - run: sudo devps ports)
+    32853        -    31.4M  [docker] ddev-aha-db 3306/tcp  ~/wp/aha
+    32854        -    87.1M  [docker] ddev-aha-web 80/tcp  ~/wp/aha
+    32857        -     313M  [docker] ddev-lampandpath-web 80/tcp  ~/wp/lampandpath
+```
+
+The RAM is the whole container, summed over its processes. `devps port <n>`
+tells the container's story, where `docker-proxy`'s would end at `dockerd`:
+
+```
+$ devps port 32854
+PORT 32854
+  container    : ddev-aha-web  ddev/ddev-webserver:v1.25.1-aha-built
+  forwards to  : 80/tcp inside it
+  project      : ~/wp/aha  (DDEV project aha)
+  stop with    : ddev stop aha
+
+PROCESSES in ddev-aha-web
+      PID      RAM  COMMAND
+    80197    15.9M  python3 /usr/bin/supervisord -n -c /etc/supervisor/supervisor...
+    82011    15.4M  mailpit
+    ...
+```
+
+`devps projects` files a site's containers under its folder, and DDEV's router
+and ssh agent, which serve every site, on a row of their own:
+
+```
+   PROCS       RAM      SWAP  PORTS          PROJECT
+      31      1.2G     32.6M  32857,32858,32 ~/wp/lampandpath
+      27      512M         -  32869,32870,32 ~/wp/lampandpath-inner-templates
+      28      122M      124M  32853,32854,32 ~/wp/aha
+      11      104M     1020K  80,443,8025,80 (DDEV shared)
+```
+
+Processes inside a container keep their own group, and name the container
+they run in, so three `mysqld` stop looking like one:
+
+```
+$ devps group database
+      PID      RAM     SWAP   UPTIME  COMMAND
+  1614951     136M        -       1m  [ddev-lampandpath-inner-db] mysqld
+  1603954     131M        -       3m  [ddev-lampandpath-db] mysqld
+    79997    23.8M    68.0M    5h02m  [ddev-aha-db] mysqld
+      581     3.0M     2.2M     2d6h  postgres -D /var/lib/postgresql/17/main ...
+```
+
+The runtime itself (`dockerd`, `containerd`, the shims, every `docker-proxy`)
+has a group of its own, `container`, instead of filling `other`.
+
+### Stopping a container
+
+`kill port` and `kill project` stop containers too, through Docker and never
+with a signal, behind the same preview and confirmation as a process:
+
+```
+$ devps kill project aha -d
+WILL STOP  (SIGTERM)
+      PID      RAM   UPTIME  COMMAND
+  4061733     3.4M    5h10m  -zsh
+  1 process(es), frees about 3.4M RAM and 3.7M swap
+WILL STOP CONTAINERS  (through Docker, not a signal)
+  ddev-aha-db, ddev-aha-web
+  $ ddev stop aha
+```
+
+- A DDEV site stops with `ddev stop <site>` when the ddev CLI is installed,
+  once for all its containers, since that also tidies what DDEV set up around
+  them. Everything else goes to `docker stop <name>`, and `-9` means
+  `docker kill`.
+- The preview shows exactly the commands that will run. One that fails is
+  reported, and `kill` exits non-zero.
+- The DDEV router is never stopped for one port: it answers 80 and 443 for
+  every site. `kill port 80` refuses and points at `ddev poweroff`.
+- `kill group container` is refused, like `kill group system`: the runtime as
+  a set is every container at once.
+
+### How it knows
+
+- **`docker ps`, once per command,** for each container's name, image,
+  published ports and labels. DDEV's `com.ddev.approot` and Compose's working
+  directory say which project a container belongs to.
+- **`/proc/<pid>/cgroup`** says which container a process is in. It is world
+  readable, so none of this needs root.
+- **Docker is optional.** Without the CLI, with the daemon stopped, or with
+  `DEVPS_DOCKER=0`, every command reads as it does without Docker.
+
+### Where it sees less
+
+- **Docker Desktop** (macOS, and WSL with Desktop) runs containers in a VM, so
+  their processes are out of sight. Ports and projects still come from
+  `docker ps`; a project whose processes cannot be seen shows `-` for its
+  cost, not a `0` that would claim it costs nothing.
+- **A remote Docker context** (`ssh://`, or `tcp://` to another host) is
+  skipped, silently: its containers publish ports over there, not here. If
+  the `[docker]` rows are missing, check `docker context ls`.
+- **Rootless Docker** is recognised: `rootlesskit`, `slirp4netns` and `pasta`
+  count as a container's forwarders, like `docker-proxy`.
+
 ## Groups
 
 Processes are bucketed by command line, first match wins:
@@ -465,6 +580,7 @@ Processes are bucketed by command line, first match wins:
 | `database` | postgres, mysqld, mariadb, redis, mongod |
 | `webserver` | apache2, nginx, php-fpm, httpd |
 | `node` | Any other node, npm, pnpm, yarn, bun |
+| `container` | The Docker runtime: dockerd, containerd, the shims, docker-proxy, docker-init, buildkitd, rootless Docker's forwarders, and Docker Desktop's own app and WSL distro. A process inside a container keeps its own group, so a containerised `mysqld` is a `database` |
 | `system` | The OS's own processes. Executable under `/System/`, `/Library/Apple/`, `/usr/libexec/`, `/usr/sbin/`, `/usr/lib/`, `/sbin/` or `/lib/`; or named `com.apple.*`; or a bare `systemd`, `systemd-*`, `launchd`, `dbus-daemon`, `rsyslogd`, `udevd`, `agetty`, `sshd`, `cron` |
 | `other` | Everything else - which, with `system` split out, means things you installed and started |
 
@@ -492,7 +608,8 @@ rows that were going to be `other`. `/usr/sbin/nginx` is still a `webserver`
 and `/usr/lib/postgresql/…/postgres` is still a `database`, because those
 branches run first.
 
-`system` is also the one group `kill` will not take as a target. Reading it is
+`system` is also one of the two groups `kill` will not take as a target;
+`container` is the other, since Docker's runtime as a set is every container. Reading it is
 useful; signalling several hundred OS daemons as a set never is, and the only
 things `kill` protects by default are pid 1 and your own session. `devps kill
 group system` refuses and tells you to name a pid instead.
@@ -520,6 +637,8 @@ useful row in the table and goes back to meaning what you would guess.
 - **`projects` can only see your own processes.** A working directory is readable for processes you own; anything else lands in the `(cwd not readable)` bucket rather than being guessed at.
 - **`doctor` needs Windows interop** for host RAM, the active Windows profile and the VHDX location. Without it, it falls back to searching for a `.wslconfig` and says so when more than one profile has one, and the VHDX is matched by distro name in the install path or reported as not located. It never pairs another distro's disk with this one's usage.
 - **PSI needs a kernel built with `CONFIG_PSI`.** Every current WSL2 kernel has it. Without it, devps falls back to load average and the D-state count.
+- **A container's RAM repeats on each of its ports.** It is the same container on every row, so adding up the column over-counts.
+- **Ports are read by number, not address.** A container on `127.0.0.1:8080` and another user's service on another address, both on 8080, share one row, named for the container. `sudo devps ports` shows them apart.
 - Set `NO_COLOR=1` for plain output when piping or logging.
 
 ## Requirements
@@ -528,8 +647,9 @@ useful row in the table and goes back to meaning what you would guess.
 - `procps` (`ps`, `pgrep`)
 - `iproute2` (`ss`)
 - awk
+- the Docker CLI, optionally, for the container features
 
-All present by default on Ubuntu and Debian WSL images.
+All but Docker present by default on Ubuntu and Debian WSL images.
 
 ## Related
 
