@@ -1406,9 +1406,13 @@ kill_cmd() {
     project)
       local hits distinct cids want=$target phys
       docker_ready
-      # a path is matched as the physical path every root is read back as, so
-      # one given through a symlink - /tmp and /var on a Mac - still names it
-      if [ -d "$want" ] && phys=$(cd -P -- "$want" && pwd -P); then want=$phys; fi
+      # A path is matched as the physical path every root is read back as, so
+      # one given through a symlink - /tmp and /var on a Mac - still names it.
+      # Only a path, though: a bare name is matched as a name, even when a
+      # directory of that name happens to sit in the current one.
+      case "$want" in
+        */*|.|..) if [ -d "$want" ] && phys=$(cd -P -- "$want" && pwd -P); then want=$phys; fi ;;
+      esac
       hits=$(project_pids "$want")
       [ -n "${hits//[[:space:]]/}" ] || die "no processes for project '$target' (try: $PROG projects)"
       distinct=$(printf '%s\n' "$hits" | cut -f1 | sort -u)
@@ -1423,7 +1427,15 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
       # is only containers is refused with it.
       cids=$(printf '%s\n' "$hits" | awk -F'\t' '$3 != "-" && !s[$3]++ { o = o (o ? "," : "") $3 } END { print o }')
       if [ -n "$cids" ]; then
-        [ "${#roots[@]}" -gt 0 ] || die "$(docker_project_refusal "$distinct" "$cids")"
+        # Refused on what could be signalled, not on what matched. The
+        # caller's own shell, and the helpers devps ran while it looked, match
+        # a project they sit in and are filtered out further down, which
+        # left a project of containers with nothing to kill and no stop said.
+        local live=0 hr
+        for hr in ${roots[@]+"${roots[@]}"}; do
+          if pid_alive "$hr" && ! is_protected "$hr"; then live=$(( live + 1 )); fi
+        done
+        [ "$live" -gt 0 ] || die "$(docker_project_refusal "$distinct" "$cids")"
         mapfile -t dnote < <(docker_stops "$cids")
       fi
       ;;
