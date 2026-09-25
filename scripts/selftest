@@ -1044,6 +1044,43 @@ else
 fi
 rm -rf "$tmp"
 
+group "bump leaves a devps.bak of your own alone"
+# git ignores untracked files, so the dirty-tree check lets bump run beside a
+# devps.bak. It used to rewrite with sed -i.bak, which overwrote that file,
+# and then delete it. The identity is set on the repo because CI has none.
+tmp=$(mktemp -d)
+mkdir -p "$tmp/repo"
+cp -r ./devps ./scripts "$tmp/repo/"
+if ( cd "$tmp/repo" \
+      && git init -q \
+      && git config user.name selftest \
+      && git config user.email selftest@localhost \
+      && git config commit.gpgsign false \
+      && git config tag.gpgsign false \
+      && git add -A \
+      && git commit -q -m init ) 2> "$tmp/init.err"; then
+  printf 'my own backup\n' > "$tmp/repo/devps.bak"
+  if ( cd "$tmp/repo" && ./scripts/bump patch ) > /dev/null 2> "$tmp/bump.err"; then
+    pass "bump ran beside an untracked devps.bak"
+  else
+    fail "bump failed beside devps.bak: $(cat "$tmp/bump.err")"
+  fi
+  if [ "$(cat "$tmp/repo/devps.bak" 2> /dev/null)" = "my own backup" ]; then
+    pass "devps.bak is untouched"
+  else
+    fail "devps.bak was overwritten or deleted"
+  fi
+  leftover=$(cd "$tmp/repo" && find . -maxdepth 1 -name 'devps.bump-*')
+  if [ -z "$leftover" ]; then
+    pass "bump removed its own backup"
+  else
+    fail "bump left its backup behind: $leftover"
+  fi
+else
+  fail "could not build the throwaway repo: $(cat "$tmp/init.err")"
+fi
+rm -rf "$tmp"
+
 # ---------------------------------------------------------------------------
 # The kill guards. If any of these regress the tool can take down the machine
 # it runs on, so they are the reason this script is gated on before release.
