@@ -630,8 +630,9 @@ esac
 # the process tables name the project ahead of the command, so a dev server
 # says which app it serves; a process in no project carries no tag. A | or =
 # in a directory name would split the pid=name map and could name another
-# pid, so it arrives as _.
-odd="$proj/we|ird=app"
+# pid, and awk -v would turn a literal \033 into an escape the terminal
+# obeys, so all three arrive as _.
+odd="$proj/"'we|ird=a\033pp'
 mkdir -p "$odd"
 echo '{}' > "$odd/package.json"
 ( cd "$odd" && exec sleep 20 ) &
@@ -643,7 +644,8 @@ other_rows=$("$DEVPS" group other)
 row_of() { printf '%s\n' "$other_rows" | awk -v p="$1" '$1 == p'; }
 has "a process in a project carries its name in the process tables" \
   "$(row_of "$deep_pid")" "[$(basename "$proj")] sleep 20"
-has "a | or = in a project name cannot split the tag map" "$(row_of "$odd_pid")" "[we_ird_app] sleep 20"
+has "a |, = or \\ in a project name cannot split the tag map or escape it" \
+  "$(row_of "$odd_pid")" "[we_ird_a_033pp] sleep 20"
 # the command straight after the uptime: a row that is missing fails too
 has "and a process in no project carries none" "$(row_of "$root_pid")" "0m  sleep 20"
 kill "$deep_pid" "$odd_pid" "$root_pid" 2>/dev/null || true

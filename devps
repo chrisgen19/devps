@@ -2639,15 +2639,16 @@ PROOTLIB='
 # pids on stdin -> pid=name|pid=name|... naming the project each one runs
 # from: the last component of the root the projects view files it under, so
 # a next-server in a monorepo reads as its app. A pid whose cwd cannot be read
-# or sits in no project is left out. | and = would split the map, so a
-# directory name carrying one has it swapped for _.
+# or sits in no project is left out. | and = would split the map, and awk -v
+# reads a \ as an escape - \n breaks the row, \033 reaches the terminal - so
+# a directory name carrying any of the three has it swapped for _.
 project_tagmap() {
   { cwd_map; tagged P; } | awk -F'\t' -v MARK="$PROJECT_MARKERS" "$PROOTLIB"'
     $1 == "C" { cwd[$2] = $3; next }
     $1 == "P" && ($2 in cwd) {
       r = proot(cwd[$2])
       if (r == "") next
-      sub(/^.*\//, "", r); gsub(/[|=]/, "_", r)
+      sub(/^.*\//, "", r); gsub(/[|=\\]/, "_", r)
       printf "%s=%s|", $2, r }'
 }
 
