@@ -329,6 +329,21 @@ A process inside a container is attributed through its container instead, to
 the project DDEV or Compose says it belongs to; see
 [Docker and DDEV](#docker-and-ddev).
 
+The process tables carry the same answer on every row: in `top`, `group`,
+`idle` and the dashboard, a process in a project has the project's folder name
+ahead of its command, so two `next-server` rows say which app each one serves:
+
+```
+$ devps group dev-server
+      PID      RAM     SWAP   UPTIME  COMMAND
+     1320     2.4G        -    4d15h  [storefront] next-server (v15.5.24)
+    76147     1.7G        -      46m  [budget-tracker-2026] next-server (v15.5.12)
+     1055    39.4M        -    4d15h  [shop-monorepo] turbo dev --filter=storefront
+```
+
+A process in a container is named by its container instead, and a process in
+no project has no tag.
+
 `devps kill project <name>` stops everything in one checkout, its containers
 included, with the same preview, confirmation and guards as every other kill.
 
