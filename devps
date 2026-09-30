@@ -199,13 +199,14 @@ function gcol(g) {
   }
   return (g in GC) ? GC[g] : ""
 }
-# "[container] " ahead of the command of a process that runs in one, from
-# CMAP (pid=name|pid=name|...), so a mysqld in a DDEV project reads as that
-# project, not as a stray database. Empty for everything else, and for every
-# caller that passes no CMAP. room is the most the tag may take: a longer
-# name is cut to fit ("[ddev-accessind...] "), so the tag can never push the
-# command, and the row, past its column. Too little room for a name and the
-# brackets means no tag at all.
+# "[name] " ahead of the command, from CMAP (pid=name|pid=name|...): the
+# container a process runs in, or else the project it runs from, so a mysqld
+# in a DDEV project reads as that project, not as a stray database, and a
+# next-server says which app it is serving. Empty for a process in neither,
+# and for every caller that passes no CMAP. room is the most the tag may
+# take: a longer name is cut to fit ("[ddev-accessind...] "), so the tag can
+# never push the command, and the row, past its column. Too little room for a
+# name and the brackets means no tag at all.
 function ctag(pid, room,   t, n) {
   if (!ct_ready) {
     ct_ready = 1
@@ -788,10 +789,10 @@ container_pids() {
 docker_ready() { [ "$DOCKER_LOADED" = 1 ] || docker_load; }
 
 # pids on stdin -> pid=name|pid=name|... for those that run in a container:
-# the CMAP that ctag reads to put the container ahead of a command in the
-# process tables. Which pids are in a container is a grep; naming the
-# containers takes docker ps, a tenth of a second, so it is only asked when
-# a row about to be shown is in one - devps top rarely is.
+# the half of the CMAP that tagmap hands ctag to put the container ahead of
+# a command in the process tables. Which pids are in a container is a grep;
+# naming the containers takes docker ps, a tenth of a second, so it is only
+# asked when a row about to be shown is in one - devps top rarely is.
 container_tagmap() {
   local inside
   inside=$({ container_pids | tagged C; tagged P; } |
@@ -1258,7 +1259,7 @@ proc_table() {
     return
   fi
   input=$(printf '%s\n' "$input" | head -n "$limit")
-  cmap=$(printf '%s\n' "$input" | cut -f1 | container_tagmap)
+  cmap=$(printf '%s\n' "$input" | cut -f1 | tagmap)
   printf '%s%s%s\n' "$C_B" "$title" "$C_0"
   printf '%s\n' "$input" | awk -F'\t' -v SHOWG="$showg" \
     -v C0="$C_0" -v CC="$C_C" -v GCOLS="$GCOLS_STR" -v CMAP="$cmap" "$AWKLIB"'
@@ -1630,7 +1631,7 @@ idle_cmd() {
   if [ -z "${rows//[[:space:]]/}" ]; then
     printf '  %s(nothing obviously idle or orphaned)%s\n\n' "$C_DIM" "$C_0"; return
   fi
-  cmap=$(printf '%s\n' "$rows" | cut -f1 | container_tagmap)
+  cmap=$(printf '%s\n' "$rows" | cut -f1 | tagmap)
   printf '%s\n' "$rows" | awk -F'\t' -v CD="$C_DIM" -v C0="$C_0" -v CY="$C_Y" -v CR="$C_R" \
     -v CC="$C_C" -v CMAP="$cmap" "$AWKLIB"'
     BEGIN { printf "  %7s %8s %8s %7s %8s  %-11s %s\n",
@@ -1876,7 +1877,7 @@ dash_sample() {
   if [ $(( us - DOCKER_US )) -ge 10000000 ]; then docker_load; DOCKER_US=$us; fi
 
   SNAP=$(snapshot)
-  DASH_CMAP=$(printf '%s\n' "$SNAP" | cut -f1 | container_tagmap)
+  DASH_CMAP=$(printf '%s\n' "$SNAP" | cut -f1 | tagmap)
   # join the previous tick counts in, so each row carries a real instant CPU%
   # match on FILENAME, not NR == FNR: on the very first sample the previous
   # file is empty, and the NR == FNR idiom then swallows every row of stdin
@@ -2634,6 +2635,32 @@ PROOTLIB='
   }
   BEGIN { nm = split(MARK, m, " ") }
 '
+
+# pids on stdin -> pid=name|pid=name|... naming the project each one runs
+# from: the last component of the root the projects view files it under, so
+# a next-server in a monorepo reads as its app. A pid whose cwd cannot be read
+# or sits in no project is left out. | and = would split the map, and awk -v
+# reads a \ as an escape - \n breaks the row, \033 reaches the terminal - so
+# a directory name carrying any of the three has it swapped for _.
+project_tagmap() {
+  { cwd_map; tagged P; } | awk -F'\t' -v MARK="$PROJECT_MARKERS" "$PROOTLIB"'
+    $1 == "C" { cwd[$2] = $3; next }
+    $1 == "P" && ($2 in cwd) {
+      r = proot(cwd[$2])
+      if (r == "") next
+      sub(/^.*\//, "", r); gsub(/[|=\\]/, "_", r)
+      printf "%s=%s|", $2, r }'
+}
+
+# pids on stdin -> the CMAP every process table hands ctag. Projects first,
+# containers after: ctag keeps the last name it reads for a pid, and for a
+# process in a container its cwd is a path inside it, which says nothing.
+tagmap() {
+  local pids
+  pids=$(cat)
+  printf '%s\n' "$pids" | project_tagmap
+  printf '%s\n' "$pids" | container_tagmap
+}
 
 # The containers, their published ports and which process is in which, as
 # the D, Q and K streams the project readers join on. Empty without Docker.
