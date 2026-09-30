@@ -631,12 +631,18 @@ esac
 # says which app it serves; a process in no project carries no tag. A | or =
 # in a directory name would split the pid=name map and could name another
 # pid, and awk -v would turn a literal \033 into an escape the terminal
-# obeys, so all three arrive as _.
-odd="$proj/"'we|ird=a\033pp'
-mkdir -p "$odd"
+# obeys, so all three arrive as _. The \ case is Linux only: Darwin's lsof
+# prints a backslash doubled, a path that does not exist, so the walk passes
+# over that folder and files the process under the project above it.
+odd="$proj/we|ird=app"
+esc="$proj/"'back\033slash'
+mkdir -p "$odd" "$esc"
 echo '{}' > "$odd/package.json"
+echo '{}' > "$esc/package.json"
 ( cd "$odd" && exec sleep 20 ) &
 odd_pid=$!
+( cd "$esc" && exec sleep 20 ) &
+esc_pid=$!
 ( cd / && exec sleep 20 ) &
 root_pid=$!
 sleep 1
@@ -644,12 +650,16 @@ other_rows=$("$DEVPS" group other)
 row_of() { printf '%s\n' "$other_rows" | awk -v p="$1" '$1 == p'; }
 has "a process in a project carries its name in the process tables" \
   "$(row_of "$deep_pid")" "[$(basename "$proj")] sleep 20"
-has "a |, = or \\ in a project name cannot split the tag map or escape it" \
-  "$(row_of "$odd_pid")" "[we_ird_a_033pp] sleep 20"
+has "a | or = in a project name cannot split the tag map" "$(row_of "$odd_pid")" "[we_ird_app] sleep 20"
+if [ "$PLAT" = Linux ]; then
+  has "a \\ in a project name cannot reach awk as an escape" "$(row_of "$esc_pid")" "[back_033slash] sleep 20"
+else
+  skip "a \\ in a project name cannot reach awk as an escape (Linux only)"
+fi
 # the command straight after the uptime: a row that is missing fails too
 has "and a process in no project carries none" "$(row_of "$root_pid")" "0m  sleep 20"
-kill "$deep_pid" "$odd_pid" "$root_pid" 2>/dev/null || true
-wait "$deep_pid" "$odd_pid" "$root_pid" 2>/dev/null || true
+kill "$deep_pid" "$odd_pid" "$esc_pid" "$root_pid" 2>/dev/null || true
+wait "$deep_pid" "$odd_pid" "$esc_pid" "$root_pid" 2>/dev/null || true
 rm -rf "$proj"
 
 group "the dashboard and the CLI share one idle predicate"
