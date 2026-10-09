@@ -256,7 +256,7 @@ What it shows that the one-shot report cannot:
 - **new processes** - a pid that appeared since the last sample is highlighted
 - **a colour per group** - `mcp` red, `ai-agent` orange, `dev-server` azure,
   `browser` blue, `editor` violet, `database` gold, `webserver` teal, `node`
-  green, `system` dark grey, `other` grey. The same colour follows a group into every table, in the
+  green, `container` pink, `terminal` tan, `system` dark grey, `other` grey. The same colour follows a group into every table, in the
   dashboard and in the one-shot report; `devps help` prints the legend
 - **the same five views** you already have as commands, on keys `1`-`5`
 
@@ -346,6 +346,9 @@ no project has no tag.
 
 `devps kill project <name>` stops everything in one checkout, its containers
 included, with the same preview, confirmation and guards as every other kill.
+Everything but its terminals: a shell sitting in the folder, or a tmux session
+started there, is a window rather than the project's work, so it is kept and
+named. The dev servers and agents running in those windows still stop.
 
 ### `devps doctor` checks the box, not the processes
 
@@ -412,7 +415,15 @@ PORT 3111
   server root  : 105283  <- what "devps kill port 3111" targets
 ```
 
-It walks **up** from the socket holder to the top of the server, so `kill port 3111` takes the whole `pnpm dev` -> `sh -c next dev` -> `next-server` -> postcss workers chain instead of orphaning the wrapper. It stops climbing at a bare interactive shell, so it can never walk up into your terminal.
+It walks **up** from the socket holder to the top of the server, so `kill port 3111` takes the whole `pnpm dev` -> `sh -c next dev` -> `next-server` -> postcss workers chain instead of orphaning the wrapper.
+
+It stops climbing at the edge of that server, judged by what a process is rather than what it is called:
+
+- **another user's process** - nothing of yours is started by someone else. On WSL every terminal hangs off a root `/init`
+- **another session** - a `setsid` or `nohup` wrapper, or an agent's tool shell (Claude Code runs each command in a `/usr/bin/zsh -c` with a session of its own)
+- **a session leader with a terminal** - the shell that a terminal window opened, whatever it is called
+
+So it cannot walk up into your terminal, or into anyone else's.
 
 ### `devps idle` is the "what did I forget about" view
 
@@ -452,23 +463,27 @@ Every kill previews the exact victims and how much they free, then asks:
 
 ```
 WILL STOP  (SIGTERM)
-      PID      RAM   UPTIME  COMMAND
-   105283     128K    2h37m  pnpm dev
-   105332      12K    2h37m  sh -c next dev --turbopack --port 3111
-   105371     2.7G    2h37m  next-server (v15.5.12)
-   105541    58.0M    2h37m  node ~/projects/budget-tracker/.next/postcss.js ...
+      PID  USER       TTY          RAM   UPTIME  COMMAND
+   105283  you        pts/3       128K    2h37m  pnpm dev
+   105332  you        pts/3        12K    2h37m  sh -c next dev --turbopack --port 3111
+   105371  you        pts/3       2.7G    2h37m  next-server (v15.5.12)
+   105541  you        pts/3      58.0M    2h37m  node ~/projects/budget-tracker/.next/...
   9 process(es), frees about 3.0G RAM and 711M swap
 
 Proceed? [y/N]
 ```
 
-Three guards, in order:
+`TTY` is the column to read: a victim on a terminal other than the one you are typing in is another window's process.
+
+Five guards, in order:
 
 1. **pid 1 is refused outright.** `refusing to kill pid 1 (init) - that would take down WSL`
 2. **Your own session is refused.** `pid 175132 is your own shell or session - refusing`
-3. **Protected subtrees are never expanded.** `kill group ai-agent` reaps other agents but leaves the session you are typing in, and its children, alone.
+3. **Another user's processes are refused.** `pid 217 belongs to root - not yours to stop`. A group or a project that takes in someone else's process leaves it, and everything under it, alone. Under `sudo`, yours means root's.
+4. **Protected subtrees are never expanded.** `kill group ai-agent` reaps other agents but leaves the session you are typing in, and its children, alone.
+5. **A group or a project never takes a terminal.** `kill group` and `kill project` keep any process that is a terminal's session leader, or has one anywhere beneath it, whatever group it is in: tmux, a terminal emulator's server, the scripts VS Code starts its server from. Stopping any of those hangs up every window it holds, and keeping the shell alone would save nothing. It is decided by what a process holds, not what it is called, so a terminal host nobody has named is kept too; so is anything in the `terminal` group, such as a `tmux attach` client. The preview names what it kept. `kill pid` names its target, so it still reaches one.
 
-Guard 3 matters more than it looks. Without it, `kill pid 1` would skip init and then expand to every one of its descendants, which is the entire system.
+Guards 3 and 4 matter more than they look. Without 4, `kill pid 1` would skip init and then expand to every one of its descendants, which is the entire system. Without 3, on WSL, every terminal hangs off a root-owned `/init`, and expanding through one reaches every terminal you have open.
 
 Use `-d` first when you are unsure. The preview is the safety net.
 
@@ -539,10 +554,7 @@ with a signal, behind the same preview and confirmation as a process:
 
 ```
 $ devps kill project aha -d
-WILL STOP  (SIGTERM)
-      PID      RAM   UPTIME  COMMAND
-  4061733     3.4M    5h10m  -zsh
-  1 process(es), frees about 3.4M RAM and 3.7M swap
+  keeping 1 pid(s) that are or hold a terminal - close those yourself: -zsh (4061733)
 WILL STOP CONTAINERS  (through Docker, not a signal)
   ddev-aha-db, ddev-aha-web
   $ ddev stop aha
@@ -556,7 +568,7 @@ WILL STOP CONTAINERS  (through Docker, not a signal)
   reported, and `kill` exits non-zero.
 - The DDEV router is never stopped for one port: it answers 80 and 443 for
   every site. `kill port 80` refuses and points at `ddev poweroff`.
-- `kill group container` is refused, like `kill group system`: the runtime as
+- `kill group container` is refused, like `kill group system` and `kill group terminal`: the runtime as
   a set is every container at once.
 
 ### How it knows
@@ -596,7 +608,8 @@ Processes are bucketed by command line, first match wins:
 | `webserver` | apache2, nginx, php-fpm, httpd |
 | `node` | Any other node, npm, pnpm, yarn, bun |
 | `container` | The Docker runtime: dockerd, containerd, the shims, docker-proxy, docker-init, buildkitd, rootless Docker's forwarders, and Docker Desktop's own app and WSL distro. A process inside a container keeps its own group, so a containerised `mysqld` is a `database` |
-| `system` | The OS's own processes. Executable under `/System/`, `/Library/Apple/`, `/usr/libexec/`, `/usr/sbin/`, `/usr/lib/`, `/sbin/` or `/lib/`; or named `com.apple.*`; or a bare `systemd`, `systemd-*`, `launchd`, `dbus-daemon`, `rsyslogd`, `udevd`, `agetty`, `sshd`, `cron` |
+| `terminal` | Your terminals: `tmux`, `screen`, `herdr` (servers and clients alike), and a shell you type into (`sh`, `bash`, `zsh`, `dash`, `fish`, `ksh`, `mksh`, `tcsh`, `csh`, login shells like `-zsh` included). A shell that runs a command or a script (`sh -c next dev`, `bash backup.sh`, an agent's `zsh -c ...`) is a wrapper and stays with what it runs. Tested right after `container`, on the program alone, since a tmux session can be called anything |
+| `system` | The OS's own processes. Executable under `/System/`, `/Library/Apple/`, `/usr/libexec/`, `/usr/sbin/`, `/usr/lib/`, `/sbin/` or `/lib/`; or named `com.apple.*`; or WSL's `/init` (pid 1 and the relay above each terminal); or a bare `systemd`, `systemd-*`, `launchd`, `dbus-daemon`, `rsyslogd`, `udevd`, `agetty`, `sshd`, `cron` |
 | `other` | Everything else - which, with `system` split out, means things you installed and started |
 
 Kernel threads are excluded.
@@ -623,11 +636,12 @@ rows that were going to be `other`. `/usr/sbin/nginx` is still a `webserver`
 and `/usr/lib/postgresql/…/postgres` is still a `database`, because those
 branches run first.
 
-`system` is also one of the two groups `kill` will not take as a target;
-`container` is the other, since Docker's runtime as a set is every container. Reading it is
-useful; signalling several hundred OS daemons as a set never is, and the only
-things `kill` protects by default are pid 1 and your own session. `devps kill
-group system` refuses and tells you to name a pid instead.
+`system` is also one of the three groups `kill group` will not take as a
+target. `container` is another, since Docker's runtime as a set is every
+container, and `terminal` the third: as a set it is every window you have
+open, with every agent and dev server running in one. Reading them is useful;
+signalling several hundred OS daemons, or all your shells, as a set never is.
+`devps kill group system` refuses and tells you to name a pid instead.
 
 It matters most on macOS, where the OS runs several hundred daemons of its own.
 Measured on the same machine, from the same snapshot as the capture above:
@@ -693,8 +707,10 @@ scripts/selftest
 `scripts/selftest` is the whole test suite and runs anywhere. It only ever
 signals throwaway processes it starts itself. Alongside the read-only commands
 and input validation, it asserts the kill guards still hold: that pid 1 is
-refused, that the caller's own session is refused, that a dry run signals
-nothing, and that a real kill actually reaps a throwaway process.
+refused, that the caller's own session is refused, that another user's
+processes are never targeted, that a climb stops at another user, session or
+terminal, that a group or project kill keeps a real terminal and its host, that a dry run
+signals nothing, and that a real kill actually reaps a throwaway process.
 
 Both the ci and release workflows call that same script, so a tagged release
 cannot publish a build whose guards have regressed. Tag pushes do not trigger

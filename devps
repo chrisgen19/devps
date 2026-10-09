@@ -34,7 +34,8 @@ group_palette() {
     GCOL[database]=$'\033[38;5;221m'   # gold
     GCOL[webserver]=$'\033[38;5;79m'   # teal
     GCOL[node]=$'\033[38;5;114m'       # green
-    GCOL[container]=$'\033[38;5;175m'  # pink - the one hue left unused
+    GCOL[container]=$'\033[38;5;175m'  # pink
+    GCOL[terminal]=$'\033[38;5;180m'   # tan - warm, away from every hue above
     GCOL[system]=$'\033[38;5;240m'     # dark grey - quieter than other
     GCOL[other]=$'\033[38;5;244m'      # grey
   elif [ "$UI_COLOR" -eq 1 ]; then
@@ -42,7 +43,7 @@ group_palette() {
     GCOL[dev-server]=$'\033[36m'  GCOL[browser]=$'\033[34m'
     GCOL[editor]=$'\033[35m'   GCOL[database]=$'\033[1;33m'
     GCOL[webserver]=$'\033[1;36m' GCOL[node]=$'\033[32m'
-    GCOL[container]=$'\033[1;35m'
+    GCOL[container]=$'\033[1;35m' GCOL[terminal]=$'\033[1;34m'
     GCOL[system]=$'\033[37m'  GCOL[other]=$'\033[2m'
   fi
   # flattened for awk: group=escape|group=escape|...
@@ -349,7 +350,7 @@ function shorten(a, w,   s, h) {
 }
 '
 
-DP_GROUPS="mcp ai-agent dev-server browser editor database webserver node container system other"
+DP_GROUPS="mcp ai-agent dev-server browser editor database webserver node container terminal system other"
 
 # The group classifier, shared by every snapshot implementation. A process must
 # land in the same group whichever kernel reported it, or the group table means
@@ -374,6 +375,28 @@ function secs(t,   d, p, n, v, i) {
 '
 
 AWKCAT='
+# A terminal: a multiplexer - tmux, screen, herdr, server and clients alike -
+# or a shell you type into - one that runs neither
+# a command (-c, or a cluster with c in it like -lc) nor a script. sh -c next
+# dev and bash backup.sh are wrappers for their work and stay with it. Decided
+# on the program and the shape of its arguments, never on what they say: a
+# tmux session can be called anything, and "tmux new -s vite" is not a dev
+# server. The options listed as taking a value consume it, so the init file
+# a VS Code terminal hands bash is not read as a script. Case matters here,
+# so this reads the line as it was: fish -C takes a value, -c does not.
+function isterm(a,   n, w, b, i, t) {
+  n = split(a, w, /[ \t]+/)
+  b = w[1]; sub(/^.*\//, "", b); sub(/^-/, "", b)       # -zsh: a login zsh
+  if (tolower(b) ~ /^(tmux|screen|herdr)$/) return 1     # SCREEN is its server
+  if (b !~ /^(sh|bash|zsh|dash|fish|ksh|mksh|tcsh|csh)$/) return 0
+  for (i = 2; i <= n; i++) {
+    t = w[i]
+    if (t == "--command" || t ~ /^-[A-Za-z]*c[A-Za-z]*$/) return 0
+    if (t ~ /^(--init-file|--rcfile|--init-command|-[oOC]|\+[oO])$/) { i++; continue }
+    if (t !~ /^[-+]/) return 0
+  }
+  return 1
+}
 function cat(a,   l, exe, base) {
   l = tolower(a)
   exe = l; sub(/[ \t].*/, "", exe)
@@ -395,6 +418,9 @@ function cat(a,   l, exe, base) {
   if (base ~ /^(dockerd|containerd|containerd-shim.*|docker-proxy|docker-init|buildkitd|rootlesskit|slirp4netns|pasta(\.avx2)?|com\.docker\..+)$/ ||
       exe ~ /^\/applications\/docker\.app\/contents\/macos\// ||
       (exe ~ /^\/mnt\/wsl\/docker-desktop\// && exe !~ /\/cli-tools\//)) return "container"
+  # Second, for the same reason as the runtime: a multiplexer command line
+  # carries session and window names, and every test below reads the line.
+  if (isterm(a)) return "terminal"
   # the official packages spell it out: "@modelcontextprotocol/server-postgres"
   # contains no "mcp", so it used to fall through to the postgres branch and be
   # counted as a database. Every other spelling in the wild - mcp-server-x,
@@ -419,6 +445,10 @@ function cat(a,   l, exe, base) {
   # com.apple.fake" is not a system process, and "/home/alice/cron" is not cron.
   if (exe ~ /^\/system\/|^\/library\/apple\/|^\/usr\/libexec\/|^\/usr\/sbin\/|^\/usr\/lib\/|^\/sbin\/|^\/lib\//) return "system"
   if (exe ~ /^com\.apple\./) return "system"
+  # The WSL init: pid 1, and the root-owned relay every terminal and every
+  # interop call hangs off. Filed under other, it made kill group other a
+  # route into every terminal you had open.
+  if (exe == "/init") return "system"
   # a bare daemon name, with no path at all - a path-qualified one had to match
   # a system prefix above to count
   if (exe !~ /\// && exe ~ /^(systemd|systemd-[a-z]+|launchd|dbus-daemon|rsyslogd|udevd|agetty|sshd|cron)$/) return "system"
@@ -625,6 +655,18 @@ port_held_by_other() {
 proc_cwd_linux()  { readlink "/proc/$1/cwd"; }
 proc_cwd_darwin() { lsof -w -a -d cwd -Fn -p "$1" | sed -n 's/^n//p' | head -1; }
 proc_cwd() { "proc_cwd_$DP_PLATFORM" "$1"; }
+
+# Who owns each process, and which session and terminal it is in, as
+#   pid  ppid  uid  sid  stat  tty  user
+# - what kill decides on. Darwin's ps names no session id, so it reports -
+# there, and climb reads the session leader flag in stat instead, which both
+# kernels set. DEVPS_PROCS points at a fixture of the same lines, so a tree
+# holding another user's process is testable without root.
+proc_ids_linux()  { ps -eo pid=,ppid=,uid=,sid=,stat=,tty=,user:32=; }
+proc_ids_darwin() { ps -eo pid=,ppid=,uid=,stat=,tty=,user= | awk '{ print $1, $2, $3, "-", $4, $5, $6 }'; }
+proc_ids() {
+  if [ -n "${DEVPS_PROCS:-}" ]; then cat "$DEVPS_PROCS"; else "proc_ids_$DP_PLATFORM"; fi
+}
 
 # the group list, each name in its own colour - doubles as the colour legend
 group_legend() {
@@ -1135,8 +1177,10 @@ valid_group() { case " $DP_GROUPS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
 # would SIGTERM every daemon the OS is running - several hundred of them on a
 # Mac - and take the session with it. Reading them is useful; stopping them as
 # a set never is. container is the same shape: signalling Docker's runtime as
-# a set stops every container at once, and under Docker Desktop, Docker.
-DP_UNKILLABLE="system container"
+# a set stops every container at once, and under Docker Desktop, Docker. So is
+# terminal: as a set it is every window you have open, and every agent and
+# dev server running in one goes with it.
+DP_UNKILLABLE="system container terminal"
 killable_group() { case " $DP_UNKILLABLE " in *" $1 "*) return 1 ;; *) return 0 ;; esac; }
 
 # why a group in DP_UNKILLABLE is refused, and what to do instead
@@ -1146,6 +1190,10 @@ unkillable_why() {
       "That is Docker's runtime. Signalled as a set it stops every container," \
       "and under Docker Desktop, Docker itself. Stop containers through Docker:" \
       "docker stop <name>, or ddev stop <project>. If you really mean one process:" ;;
+    terminal) printf '%s\n       %s\n       %s' \
+      "Those are your terminals: the shells you type into and the tmux, screen or" \
+      "herdr sessions holding them. Signalled as a set, every window goes, and every" \
+      "agent and dev server running in one. If you really mean one of them:" ;;
     *) printf '%s\n       %s' \
       "Those are the operating system's own processes, not yours, and nothing" \
       "here is safe to signal as a set. If you really mean one of them, name it:" ;;
@@ -1328,14 +1376,16 @@ ancestors() {
   done
 }
 
-# a bare interactive shell / session leader - never climb past one of these
+# A bare interactive shell or session leader, by name - never climb past one
+# of these. A backstop only: names are what gave out, so climb_stops decides
+# first, on what a process is rather than what it is called.
 is_boundary() {
   local a
   a=$(ps -o args= -p "$1" | redact_line | sed 's/^ *//' || true)
   [ -z "$a" ] && return 0
   case "$a" in
-    -bash|-zsh|-sh|bash|zsh|sh|fish|login|init|/sbin/init) return 0 ;;
-    /lib/systemd/systemd*|sshd*|tmux*|screen*)             return 0 ;;
+    -bash|-zsh|-sh|bash|zsh|sh|fish|login|init|/sbin/init|/init) return 0 ;;
+    /lib/systemd/systemd*|sshd*|tmux*|screen*)                   return 0 ;;
   esac
   return 1
 }
@@ -1344,18 +1394,158 @@ PROTECTED=""
 build_protected() { PROTECTED=" 1 $$ $(ancestors $$ | tr '\n' ' ') "; }
 is_protected() { case "$PROTECTED" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
+# One proc_ids read per command, held for climb, kill_set and the kill
+# preview, so the three agree on a single moment. PI_RAW keeps the lines for
+# kill_set's awk; the arrays answer climb's per-pid questions without a fork.
+declare -A PI_PPID=() PI_UID=() PI_SID=() PI_STAT=() PI_TTY=() PI_USER=()
+PI_RAW=""
+PI_LOADED=0
+proc_ids_load() {
+  local pid ppid uid sid stat tty user
+  PI_PPID=(); PI_UID=(); PI_SID=(); PI_STAT=(); PI_TTY=(); PI_USER=()
+  PI_RAW=$(proc_ids)
+  while read -r pid ppid uid sid stat tty user; do
+    [ -n "$pid" ] || continue
+    PI_PPID[$pid]=$ppid; PI_UID[$pid]=$uid; PI_SID[$pid]=$sid
+    PI_STAT[$pid]=$stat; PI_TTY[$pid]=$tty; PI_USER[$pid]=$user
+  done <<< "$PI_RAW"
+  PI_LOADED=1
+}
+proc_ids_ready() { [ "$PI_LOADED" = 1 ] || proc_ids_load; }
+
+# s in stat: a session leader, on Linux and Darwin alike
+session_leader() { [[ ${PI_STAT[$1]:-} == *s* ]]; }
+# a controlling terminal as ps spells one - pts/3, ttys001 - never ? or ??
+on_tty() { case "${PI_TTY[$1]:-?}" in ""|"?"|"??"|-) return 1 ;; *) return 0 ;; esac; }
+
+# Is parent outside the server that cur belongs to. Three things say so
+# whatever a process is called, which is where matching on names gave out: a
+# WSL terminal hangs off a root /init, and Claude Code's tool shells run as
+# /usr/bin/zsh -c, so a climb went straight past both.
+#   another user's process - nothing of yours is started by someone else
+#   another session        - setsid, a tool shell, or an orphan reparented to
+#                            whatever adopted it
+#   a session leader with a terminal - the shell that terminal opened
+# Darwin's ps names no session, so there "another session" is cur being a
+# session leader itself: its parent is in another session by construction.
+# Linux compares the ids, which also catches an orphan, whose session died.
+climb_stops() {  # <cur> <parent> <uid the climb started from>
+  local cur=$1 parent=$2
+  [ "${PI_UID[$parent]:-}" = "$3" ] || return 0
+  if [ "${PI_SID[$cur]:--}" != - ] && [ "${PI_SID[$parent]:--}" != - ]; then
+    [ "${PI_SID[$cur]}" = "${PI_SID[$parent]}" ] || return 0
+  else
+    session_leader "$cur" && return 0
+  fi
+  session_leader "$parent" && on_tty "$parent" && return 0
+  return 1
+}
+
 # climb from a listener pid to the top-most process still part of that server
 climb() {
-  local cur="$1" parent
+  local cur="$1" parent uid
+  proc_ids_ready
+  uid=${PI_UID[$cur]:-}
+  # gone, or started after the read: nothing is known about its parents
+  if [ -z "$uid" ]; then echo "$cur"; return; fi
   while true; do
-    parent=$(ps -o ppid= -p "$cur" | tr -d ' ' || true)
+    parent=${PI_PPID[$cur]:-}
     [ -n "$parent" ] || break
     [ "$parent" -le 1 ] && break
     is_protected "$parent" && break
+    climb_stops "$cur" "$parent" "$uid" && break
     is_boundary "$parent" && break
     cur="$parent"
   done
   echo "$cur"
+}
+
+# What kill reaches from its roots, as "K pid" to stop, "P pid" kept as your
+# own shell or session, and "O pid" kept as another user's. Nothing under a
+# kept process is expanded: protected subtrees as before, and now another
+# user's too. On WSL every terminal hangs off a root /init, and expanding
+# through one reached every terminal you had open. One read of the process
+# table, walked breadth first, rather than a pgrep per process.
+#
+# -t, which kill group and kill project pass, also keeps a terminal, as
+# "T pid": a session leader on a tty, and every process with one anywhere
+# beneath it. Stopping a leader hangs up its terminal; stopping anything above
+# one - tmux, a terminal emulator's server, the scripts VS Code launches its
+# server from - takes the terminal down with it, and keeping the shell alone
+# saves nothing. Decided on what the process holds, not what it is called, so
+# a terminal host nobody has named yet is kept too - and so is anything the
+# terminal group names, held in FENCE_PIDS, which covers a tmux attach client:
+# a window's view of a session, leading nothing. A project is a set like a
+# group: a shell sitting in the folder, or a tmux server started there, is a
+# window, not the project's work. kill pid names its target and is not
+# fenced; neither is kill port, whose climb already stops at a terminal.
+FENCE_PIDS=" "
+kill_set() {  # [-t] <uid> <root pid...>
+  local fence=0 uid
+  if [ "${1:-}" = -t ]; then fence=1; shift; fi
+  uid=$1
+  shift
+  proc_ids_ready
+  printf '%s\n' "$PI_RAW" | awk -v me="$uid" -v roots="$*" -v prot="$PROTECTED" -v fence="$fence" \
+    -v named="$FENCE_PIDS" '
+    NF { kids[$2] = kids[$2] " " $1; owner[$1] = $3; up[$1] = $2
+         if (fence && $5 ~ /s/ && $6 != "?" && $6 != "??" && $6 != "-") lead[++nl] = $1 }
+    END {
+      # each terminal holds itself and every process above it; a walk ends
+      # where an earlier one already went, since all above that is marked
+      for (k = 1; k <= nl; k++)
+        for (p = lead[k]; p != "" && !(p in holds); p = up[p]) holds[p] = 1
+      n = split(roots, q, " ")
+      # n grows as children are queued, and the bound is read every pass
+      for (i = 1; i <= n; i++) {
+        p = q[i]
+        if (p in seen) continue
+        seen[p] = 1
+        if (index(prot, " " p " ")) { print "P", p; continue }
+        if (!(p in owner)) continue                    # gone since the read
+        if (owner[p] != me) { print "O", p; continue }
+        if ((p in holds) || (fence && index(named, " " p " "))) { print "T", p; continue }
+        print "K", p
+        m = split(kids[p], c, " ")
+        for (j = 1; j <= m; j++) q[++n] = c[j]
+      }
+    }'
+}
+
+# the distinct owners of some pids, for saying whose processes kill left alone
+owners_of() {
+  local p u out=""
+  local -A seen=()
+  for p in "$@"; do
+    u=${PI_USER[$p]:-?}
+    [ -n "${seen[$u]:-}" ] && continue
+    seen[$u]=1; out+="${out:+, }$u"
+  done
+  printf '%s' "$out"
+}
+
+# "herdr server (764026), tmux (90185)" for the first few pids, so a process
+# kill keeps says what it is. The command line rather than comm, which for
+# node is a thread name like MainThread; shortened and redacted as the tables
+# show it.
+pid_names() {
+  local -a some=("${@:1:6}")
+  local more=$(( $# - ${#some[@]} ))
+  ps -o pid=,args= -p "$(IFS=,; printf '%s' "${some[*]}")" | awk -v more="$more" "$AWKLIB"'
+    { a = ""; for (i = 2; i <= NF; i++) a = a (i > 2 ? " " : "") $i
+      printf "%s%s (%s)", (NR > 1 ? ", " : ""), shorten(a, 28), $1 }
+    END { if (more > 0) printf " and %d more", more }'
+}
+
+# "a", "a or b", "a, b or c"
+join_or() {
+  local out="" i
+  for (( i = 1; i <= $#; i++ )); do
+    if [ "$i" -eq 1 ]; then out=${!i}
+    elif [ "$i" -eq $# ]; then out+=" or ${!i}"
+    else out+=", ${!i}"; fi
+  done
+  printf '%s' "$out"
 }
 
 tree_cmd() {
@@ -1381,8 +1571,8 @@ pids_table() {
 
 # ------------------------------------------------------------------- kill ----
 kill_cmd() {
-  local kind="" target="" assume_yes=0 sig=TERM dry=0 a r p stop_cids=""
-  local -a roots=() pids=() skipped=() all=() climbed=() plan=()
+  local kind="" target="" assume_yes=0 sig=TERM dry=0 a r p k stop_cids=""
+  local -a roots=() pids=() skipped=() others=() terminals=() climbed=() plan=() fence=()
 
   for a in "$@"; do
     case "$a" in
@@ -1403,6 +1593,9 @@ kill_cmd() {
   fi
 
   build_protected
+  proc_ids_load
+  # one snapshot for a set's members and its fence, so the two agree
+  case "$kind" in group|project) SNAP=$(snapshot) ;; esac
 
   case "$kind" in
     port)
@@ -1444,6 +1637,8 @@ kill_cmd() {
       pid_alive "$target" || die "no such process: $target"
       [ "$target" -le 1 ] && die "refusing to kill pid $target (init) - that would take down WSL"
       is_protected "$target" && die "pid $target is your own shell or session - refusing"
+      [ "${PI_UID[$target]:-}" = "$EUID" ] ||
+        die "pid $target belongs to ${PI_USER[$target]:-another user} - not yours to stop"
       roots=("$target")
       ;;
     group)
@@ -1451,7 +1646,7 @@ kill_cmd() {
       killable_group "$target" || die "refusing to stop the '$target' group.
        $(unkillable_why "$target")
        $PROG kill pid <n>"
-      mapfile -t roots < <(snapshot | awk -F'\t' -v g="$target" '$6 == g { print $1 }')
+      mapfile -t roots < <(snap | awk -F'\t' -v g="$target" '$6 == g { print $1 }')
       [ "${#roots[@]}" -gt 0 ] || die "no processes in group '$target'"
       ;;
     project)
@@ -1479,20 +1674,31 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
       ;;
   esac
 
-  for r in ${roots[@]+"${roots[@]}"}; do
-    if is_protected "$r"; then skipped+=("$r"); continue; fi
-    all+=("$r")
-    mapfile -t -O "${#all[@]}" all < <(descendants "$r")
-  done
-  for p in $(printf '%s\n' ${all[@]+"${all[@]}"} | sort -un); do
-    pid_alive "$p" || continue
-    if is_protected "$p"; then skipped+=("$p"); else pids+=("$p"); fi
-  done
+  # a group or a project is a set, and a set never takes a terminal: see kill_set
+  case "$kind" in
+    group|project)
+      fence=(-t)
+      FENCE_PIDS=" $(snap | awk -F'\t' '$6 == "terminal" { printf "%s ", $1 }') " ;;
+  esac
+  if [ "${#roots[@]}" -gt 0 ]; then
+    while read -r k p; do
+      case "$k" in
+        K) pid_alive "$p" && pids+=("$p") ;;
+        P) skipped+=("$p") ;;
+        O) others+=("$p") ;;
+        T) terminals+=("$p") ;;
+      esac
+    done < <(kill_set ${fence[@]+"${fence[@]}"} "$EUID" "${roots[@]}" | sort -k2,2n)
+  fi
   if [ -n "$stop_cids" ]; then mapfile -t plan < <(container_stop_plan "$stop_cids" "$sig"); fi
 
   if [ "${#pids[@]}" -eq 0 ] && [ "${#plan[@]}" -eq 0 ]; then
+    local -a why=()
+    [ "${#skipped[@]}" -gt 0 ] && why+=("your own session")
+    [ "${#others[@]}" -gt 0 ] && why+=("another user's ($(owners_of "${others[@]}"))")
+    [ "${#terminals[@]}" -gt 0 ] && why+=("a terminal or holds one")
     printf '%sNothing to kill' "$C_Y"
-    [ "${#skipped[@]}" -gt 0 ] && printf ' - every match is your own session'
+    if [ "${#why[@]}" -gt 0 ]; then printf ' - every match is %s' "$(join_or "${why[@]}")"; fi
     printf '%s\n' "$C_0"
     return 1
   fi
@@ -1501,6 +1707,14 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
   if [ "${#skipped[@]}" -gt 0 ]; then
     printf '  %skeeping %d pid(s) - your own shell/session: %s%s\n' \
       "$C_G" "${#skipped[@]}" "${skipped[*]}" "$C_0"
+  fi
+  if [ "${#others[@]}" -gt 0 ]; then
+    printf '  %sleaving %d pid(s) owned by %s - not yours to stop, nor anything under them%s\n' \
+      "$C_G" "${#others[@]}" "$(owners_of "${others[@]}")" "$C_0"
+  fi
+  if [ "${#terminals[@]}" -gt 0 ]; then
+    printf '  %skeeping %d pid(s) that are or hold a terminal - close those yourself: %s%s\n' \
+      "$C_G" "${#terminals[@]}" "$(pid_names "${terminals[@]}")" "$C_0"
   fi
   if [ "${#plan[@]}" -gt 0 ]; then container_stop_preview "$stop_cids" "${plan[@]}"; fi
 
@@ -1535,19 +1749,30 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
 # A victim missing from the snapshot still gets a row. It is a pid we are
 # about to signal, and silently dropping it would understate what is being
 # stopped - the same failure as showing no rows at all.
+#
+# USER and TTY come from the proc_ids read kill decided on. TTY is the column
+# that matters: a victim on a terminal other than this one is somebody else's
+# window, which is worth seeing before saying yes.
 kill_preview() {  # <sig> <pid...>
-  local sig=$1 vic freed
+  local sig=$1 vic freed p ids=""
   shift
   vic=$( { printf 'P\t%s\n' "$@"; snapshot; } | awk -F'\t' '
     $1 == "P" { want[$2] = 1; order[++n] = $2; next }
     ($1 in want) { seen[$1] = 1; print }
     END { for (i = 1; i <= n; i++)
             if (!(order[i] in seen)) printf "%s\t0\t0\t0\t0\t?\t?\n", order[i] }')
+  for p in "$@"; do ids+="I"$'\t'"$p"$'\t'"${PI_USER[$p]:-?}"$'\t'"${PI_TTY[$p]:-?}"$'\n'; done
 
   printf '%sWILL STOP%s  %s(SIG%s)%s\n' "$C_B" "$C_0" "$C_DIM" "$sig" "$C_0"
-  printf '%s\n' "$vic" | awk -F'\t' "$AWKLIB"'
-    BEGIN { printf "  %7s %8s %8s  %s\n", "PID", "RAM", "UPTIME", "COMMAND" }
-    { printf "  %7s %8s %8s  %s\n", $1, hum($2), dur($4), shorten($7, 56) }'
+  printf '%s%s\n' "$ids" "$vic" | awk -F'\t' "$AWKLIB"'
+    BEGIN { printf "  %7s  %-10s %-7s %8s %8s  %s\n", "PID", "USER", "TTY", "RAM", "UPTIME", "COMMAND" }
+    $1 == "I" {
+      u = $3; if (length(u) > 10) u = substr(u, 1, 9) "+"
+      t = $4; if (t == "?" || t == "??" || t == "") t = "-"
+      user[$2] = u; tty[$2] = t; next
+    }
+    { printf "  %7s  %-10s %-7s %8s %8s  %s\n", $1, ($1 in user ? user[$1] : "?"),
+             ($1 in tty ? tty[$1] : "-"), hum($2), dur($4), shorten($7, 42) }'
 
   freed=$(printf '%s\n' "$vic" | awk -F'\t' '
     { r += $2; s += $3 } END { print r "+" s }')
@@ -3114,7 +3339,8 @@ ${C_B}STOPPING${C_0}
   ${C_C}$PROG kill project${C_0} <name>  stop everything running in one project
 
   Kill previews exactly what dies and how much it frees, then asks.
-  It refuses to touch your own shell or the session you are typing in.
+  It refuses to touch your own shell or the session you are typing in,
+  and leaves every process another user owns, and all beneath it, alone.
   A container is stopped through Docker, never signalled: ddev stop for
   a DDEV site, docker stop for the rest.
 

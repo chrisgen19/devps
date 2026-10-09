@@ -842,6 +842,37 @@ expect_group database   '/usr/sbin/mariadbd --user=mysql'
 # and an argument naming the runtime does not make something Docker
 expect_group node       'node app.js --runtime=dockerd'
 expect_group other      '/home/u/bin/tool --exec /usr/bin/containerd'
+# WSL's init and the root relay above every terminal are the OS's: as other,
+# kill group other went through them into every terminal. Only that exact
+# executable, though - an init of your own is still yours.
+expect_group system     '/init'
+expect_group other      '/home/u/bin/init --config x'
+# a terminal: a shell you type into, and the multiplexers that hold them
+expect_group terminal   '-zsh'
+expect_group terminal   '/usr/bin/zsh'
+expect_group terminal   'bash'
+expect_group terminal   'zsh -i'
+expect_group terminal   'bash -l'
+expect_group terminal   'tmux attach -t =work'
+expect_group terminal   'SCREEN -S work'
+# herdr too, its server and its clients, as they run here
+expect_group terminal   '/home/u/.local/bin/herdr server'
+expect_group terminal   'herdr'
+expect_group other      '/home/u/bin/herdr-sync'
+# a value an option takes is not a script: the init file a VS Code terminal
+# hands bash names .vscode-server, and must not make the shell an editor
+expect_group terminal   '/bin/bash --init-file /home/u/.vscode-server/bin/a1/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh'
+expect_group terminal   'fish -C set_greeting'
+# the program decides, never its arguments: a session can be called anything
+expect_group terminal   'tmux new-session -d -s mcp-tools -n vite-app'
+# a shell that runs a command or a script is a wrapper, and stays with its work
+expect_group dev-server 'sh -c next dev'
+expect_group mcp        'sh -c "chrome-devtools-mcp" --headless=true'
+expect_group other      '/usr/bin/zsh -c source /home/u/.claude/shell-snapshots/snapshot-zsh.sh'
+expect_group other      'zsh -lc make'
+expect_group other      'fish --command ls'
+expect_group other      'bash /home/u/bin/backup.sh'
+expect_group other      '/home/u/bin/tmux-sessionizer'
 expect_group other      'vim /etc/docker/daemon.json'
 expect_group mcp        'docker mcp gateway run'
 # Docker Desktop ships the CLI and its plugins beside its runtime, and the CLI
@@ -992,6 +1023,27 @@ fi
 # an empty match would fail the command too
 has "kill group container is refused by the guard, with the Docker way out" \
   "$("$DEVPS" kill group container -d 2>&1 > /dev/null)" "Stop containers through Docker"
+# terminal as a set is every window open, and everything running in one
+if killable_group terminal; then
+  fail "killable_group rejects terminal"
+else
+  pass "killable_group rejects terminal"
+fi
+# the words again: a CI runner may have no terminal to match
+has "kill group terminal is refused by the guard" \
+  "$("$DEVPS" kill group terminal -d 2>&1 > /dev/null)" "Those are your terminals"
+# and a real shell waiting at a prompt is filed there, not under other, where
+# kill group other would take it. A shell reading from a pipe that stays open
+# stands in for one: no command, no script, nothing to say it is not.
+sleep 37 | sh &
+term_pid=$!
+sleep 1
+same "a real shell at a prompt is in terminal, not other" \
+  "$("$DEVPS" group terminal | awk -v p="$term_pid" '$1 == p { print "terminal" }')$(
+     "$DEVPS" group other | awk -v p="$term_pid" '$1 == p { print "+other" }')" terminal
+kill "$term_pid" 2> /dev/null || true
+pkill -P $$ -f '^sleep 37$' 2> /dev/null || true
+wait "$term_pid" 2> /dev/null || true
 
 # -d as well, so a regression here fails the test rather than the runner
 guard_err=$(mktemp)
@@ -1137,14 +1189,202 @@ else
   fail "self-kill refused for the wrong reason: $(cat "$err")"
 fi
 
+group "kill reaches only what is yours"
+# Every function in devps without its main, for the checks that drive one
+# directly. A subshell, so nothing devps defines leaks into this script, and
+# the snippet runs after the load, so it can set what devps initialises.
+devps_run() { ( eval "$(sed -n '1,/^# -* main ----$/p' "$DEVPS")"; eval "$1" ); }
+
+# A tree with other users in it, as proc_ids reports one: your server 10, a
+# setuid helper 12 under it that started 13 back as you, and a root relay 20
+# with a terminal under it - the shape of a WSL /init. 30 is your own session.
+# Nothing under 12, 20 or 30 may be reached.
+procs=$(mktemp)
+printf '%s\n' \
+  '10 1 1000 10 Ss ? me' '11 10 1000 10 S ? me' '12 11 0 10 S ? root' \
+  '13 12 1000 10 S ? me' '14 10 1000 10 S ? me' '20 1 0 20 Ss ? root' \
+  '21 20 1000 21 Ss pts/2 me' '22 21 1000 21 S+ pts/2 me' \
+  '30 1 1000 30 Ss pts/1 me' '31 30 1000 30 S+ pts/1 me' > "$procs"
+same "kill_set keeps your session and another user's process, and nothing under either" \
+  "$(DEVPS_PROCS="$procs" devps_run 'PROTECTED=" 1 30 "; kill_set 1000 10 20 30' |
+     sort -k2,2n | tr '\n' ' ')" \
+  "K 10 K 11 O 12 K 14 O 20 P 30 "
+
+# A group never takes a terminal, by what a process holds, not its name:
+#   40  a terminal host nobody has named, holding shell 41 on pts/3, with an
+#       agent 42 running in it
+#   50  a launcher with no tty of its own, whose server 51 holds shell 52 -
+#       a terminal two levels down, the shape of VS Code's server
+#   60  a session leader on a tty that is no shell, like an sh -c launcher
+#   70  an ordinary process, with no terminal anywhere under it
+# kill pid names its target, so without -t every one of them is reachable.
+printf '%s\n' \
+  '40 1 1000 40 Ssl ? me' '41 40 1000 41 Ss pts/3 me' '42 41 1000 41 Sl+ pts/3 me' \
+  '50 1 1000 50 S ? me' '51 50 1000 50 Sl ? me' '52 51 1000 52 Ss pts/4 me' \
+  '60 1 1000 60 Ss+ pts/5 me' '61 60 1000 60 S+ pts/5 me' \
+  '70 1 1000 70 S ? me' '71 70 1000 70 S ? me' > "$procs"
+same "with -t, a terminal, and anything with one beneath it, is kept and not expanded" \
+  "$(DEVPS_PROCS="$procs" devps_run 'PROTECTED=" 1 "; kill_set -t 1000 40 50 60 70' |
+     sort -k2,2n | tr '\n' ' ')" \
+  "T 40 T 50 T 60 K 70 K 71 "
+same "and without it, nothing is fenced" \
+  "$(DEVPS_PROCS="$procs" devps_run 'PROTECTED=" 1 "; kill_set 1000 40 50 60 70' |
+     sort -k2,2n | awk '{ printf "%s ", $1 }')" "K K K K K K K K K K "
+# what the terminal group names is fenced as well, for a tmux client that
+# leads nothing - but only for a set, never for a pid named outright
+same "with -t, a process the terminal group names is kept, though it holds no tty" \
+  "$(DEVPS_PROCS="$procs" devps_run 'PROTECTED=" 1 "; FENCE_PIDS=" 70 "; kill_set -t 1000 70' |
+     tr '\n' ' ')" "T 70 "
+same "and without -t the name fences nothing" \
+  "$(DEVPS_PROCS="$procs" devps_run 'PROTECTED=" 1 "; FENCE_PIDS=" 70 "; kill_set 1000 70' |
+     sort -k2,2n | tr '\n' ' ')" "K 70 K 71 "
+
+# Where a climb has to stop, one rule at a time. Names are no help, so the
+# name check is switched off and these pids need not exist:
+#   310 -> 300  next under pnpm dev, in a terminal whose shell 200 leads a
+#               session on pts/1                    (a terminal's shell)
+#   530 -> 510  a dev server an agent's tool shell 510 started; the shell has
+#               a session of its own, under agent 500 (another session)
+#   710 -> 710  a process of yours whose parent 700 is root's, in the same
+#               session - sudo -u, say              (another user)
+#   610 -> 610  an orphan from dead session 999, adopted by your own
+#               subreaper 600 - which only Linux's session ids can tell
+# Each one used to climb to the root relay 100, or to 600.
+climb_fixture() {  # <sid column: ids or ->
+  awk -v dash="$1" '{ if (dash == "-") $4 = "-"; print }' <<'EOF'
+100 1 0 100 Ss ? root
+200 100 1000 200 Ss pts/1 me
+300 200 1000 200 S+ pts/1 me
+310 300 1000 200 S+ pts/1 me
+500 200 1000 200 Sl+ pts/1 me
+510 500 1000 510 Ss ? me
+520 510 1000 510 S ? me
+530 520 1000 510 S ? me
+600 1 1000 600 Ss ? me
+610 600 1000 999 S ? me
+700 100 0 700 Ss ? root
+710 700 1000 700 S ? me
+EOF
+}
+# shellcheck disable=SC2016  # expanded by devps_run, inside the subshell
+climbs() {  # <fixture file> <listener...>
+  DEVPS_PROCS=$1 LS="${*:2}" devps_run '
+    PROTECTED=" 1 "; is_boundary() { return 1; }
+    for l in $LS; do printf "%s " "$(climb "$l")"; done'
+}
+climb_fixture ids > "$procs"
+same "climb stops at a terminal's shell, another session, another user and an orphan's adopter" \
+  "$(climbs "$procs" 310 530 710 610)" "300 510 710 610 "
+# Darwin's ps names no session, so there a session leader stands in for one
+climb_fixture - > "$procs"
+same "and without session ids, at a session leader" "$(climbs "$procs" 310 530 710)" "300 510 710 "
+rm -f "$procs"
+
+# The same on a real tree: a server under a wrapper that made itself a
+# session, the shape of setsid, nohup and an agent's tool shell. Climbed as if
+# from another terminal, so this session's protection cannot end it early: it
+# has to stop at the wrapper, not walk on through this script and past it.
+perl -MPOSIX -e 'POSIX::setsid() or die "setsid: $!"; exec @ARGV' sh -c 'sleep 30 & wait' &
+wrapper=$!
+sleep 1
+inner=$(pgrep -P "$wrapper" | head -1)
+case "$(ps -o stat= -p "$wrapper")" in
+  *s*) leader=1 ;;
+  *)   leader=0 ;;
+esac
+if [ -z "$inner" ] || [ "$leader" != 1 ]; then
+  skip "a real server under a setsid wrapper climbs to the wrapper (could not start one)"
+else
+  # shellcheck disable=SC2016  # expanded by devps_run, inside the subshell
+  same "a real server under a setsid wrapper climbs to the wrapper and no further" \
+    "$(LS=$inner devps_run 'PROTECTED=" 1 "; climb "$LS"')" "$wrapper"
+fi
+kill "$inner" "$wrapper" 2> /dev/null || true
+wait "$wrapper" 2> /dev/null || true
+
+# and on this machine's own processes: any pid another user owns, by pid or
+# as part of a group. Not this script's ancestors, which are refused first.
+me=$(id -u)
+anc=" $$ $(p=$PPID; while [ -n "$p" ] && [ "$p" -gt 1 ]; do
+  printf '%s ' "$p"; p=$(ps -o ppid= -p "$p" | tr -d ' '); done)"
+theirs=$(ps -eo pid=,uid= | awk -v me="$me" -v anc="$anc " '
+  $1 > 1 && $2 != me && !index(anc, " " $1 " ") { print $1; exit }')
+if [ -z "$theirs" ]; then
+  skip "another user's pid is refused (no other user's process here)"
+else
+  has "another user's pid is refused" "$("$DEVPS" kill pid "$theirs" -d 2>&1 > /dev/null)" \
+    "not yours to stop"
+fi
+# On WSL, kill group other once listed every terminal, through the root
+# /init above each one. -d, and every row checked against its real owner.
+grp_out=$("$DEVPS" kill group other -d) || true
+foreign=$(printf '%s\n' "$grp_out" | awk '$1 ~ /^[0-9]+$/ && $2 !~ /^process/ { print $1 }' |
+  while read -r p; do
+    u=$(ps -o uid= -p "$p" | tr -d ' ')
+    if [ -n "$u" ] && [ "$u" != "$me" ]; then echo "$p"; fi
+  done)
+same "kill group never lists a process another user owns" "$foreign" ""
+
+# And a real terminal, open in a project: pty.fork opens one and makes its
+# child the session leader on it, as a terminal emulator's server does. The
+# python holding it is in other, like a host nobody has named, so neither kill
+# group other nor kill project may take it or its child - while an ordinary
+# process in the same project still goes, and so does nothing the terminal
+# group names: a tmux client leads no session, so only its name keeps it.
+# kill pid names its target, and still reaches the host and its terminal.
+if ! command -v python3 > /dev/null; then
+  skip "a group or project keeps a real terminal and its host (no python3)"
+else
+  ptproj=$(mktemp -d)
+  ptproj=$(cd -P "$ptproj" && pwd -P)
+  echo '{}' > "$ptproj/package.json"
+  ( cd "$ptproj" && exec python3 -c 'import os, pty, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp("sleep", ["sleep", "30"])
+time.sleep(30)' ) &
+  host=$!
+  ( cd "$ptproj" && exec -a tmux sleep 30 ) & client=$!
+  ( cd "$ptproj" && exec sleep 30 ) & plain=$!
+  sleep 1
+  held=$(pgrep -P "$host" | head -1)
+  held_tty=$(ps -o tty= -p "${held:-0}" | tr -d ' ')
+  case "$(ps -o stat= -p "${held:-0}")|$held_tty" in
+    *s*\|\?|*s*\|\?\?|*\|) skip "a group or project keeps a real terminal and its host (no pty to hold)" ;;
+    *s*)
+      listed() {  # <kill output> -> which of host, its terminal, the client and the plain process it lists
+        printf '%s\n' "$1" | awk -v h="$host" -v c="$held" -v t="$client" -v o="$plain" '
+          $1 == h { s = s "host " } $1 == c { s = s "terminal " } $1 == t { s = s "client " }
+          $1 == o { s = s "plain " } END { printf "%s", s }'
+      }
+      grp_out=$("$DEVPS" kill group other -d) || true
+      same "a group keeps a real terminal and its host" "$(listed "$grp_out")" "plain "
+      has "and names them as kept" "$grp_out" "($host)"
+      prj_out=$("$DEVPS" kill project "$ptproj" -d) || true
+      same "so does a project, and a tmux client in it, while its other work still stops" \
+        "$(listed "$prj_out")" "plain "
+      has "and the project names them as kept too" "$prj_out" "($client)"
+      same "while kill pid, naming the host, still reaches it and its terminal" \
+        "$(listed "$("$DEVPS" kill pid "$host" -d)")" "host terminal " ;;
+    *) skip "a group or project keeps a real terminal and its host (the child leads no session)" ;;
+  esac
+  kill "$held" "$host" "$client" "$plain" 2> /dev/null || true
+  wait "$host" "$client" "$plain" 2> /dev/null || true
+  rm -rf "$ptproj"
+fi
+
 group "dry run is inert"
 sleep 300 &
 victim=$!
-if "$DEVPS" kill pid "$victim" -d | grep -q "dry run - nothing was killed"; then
-  pass "dry run reports itself"
-else
-  fail "dry run did not report itself"
-fi
+dry_out=$("$DEVPS" kill pid "$victim" -d)
+has "dry run reports itself" "$dry_out" "dry run - nothing was killed"
+# the owner and the terminal of each victim, so another window's processes
+# stand out before anyone says yes
+has "the preview has USER and TTY columns" "$dry_out" "USER       TTY"
+me_name=$(id -un)
+[ "${#me_name}" -gt 10 ] && me_name="${me_name:0:9}+"
+has "and names the owner of each victim" \
+  "$(printf '%s\n' "$dry_out" | awk -v p="$victim" '$1 == p')" "$victim  $me_name"
 if kill -0 "$victim" 2> /dev/null; then
   pass "dry run left the process alive"
 else
