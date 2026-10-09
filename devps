@@ -1479,7 +1479,15 @@ climb() {
 # group: a shell sitting in the folder, or a tmux server started there, is a
 # window, not the project's work. kill pid names its target and is not
 # fenced; neither is kill port, whose climb already stops at a terminal.
+#
+# Two more kinds are kept. "U pid": a process of yours beneath one kept as
+# another user's. Every member of a group is queued as a root of its own, so
+# without this a member under someone else's process was reached without
+# passing through it. "C pid": a process inside a container, held in
+# CONT_PIDS. DDEV runs those as you, so ownership does not catch them, and a
+# container is stopped through Docker, never signalled.
 FENCE_PIDS=" "
+CONT_PIDS=" "
 kill_set() {  # [-t] <uid> <root pid...>
   local fence=0 uid
   if [ "${1:-}" = -t ]; then fence=1; shift; fi
@@ -1487,9 +1495,10 @@ kill_set() {  # [-t] <uid> <root pid...>
   shift
   proc_ids_ready
   printf '%s\n' "$PI_RAW" | awk -v me="$uid" -v roots="$*" -v prot="$PROTECTED" -v fence="$fence" \
-    -v named="$FENCE_PIDS" '
+    -v named="$FENCE_PIDS" -v cont="$CONT_PIDS" '
     NF { kids[$2] = kids[$2] " " $1; owner[$1] = $3; up[$1] = $2
          if (fence && $5 ~ /s/ && $6 != "?" && $6 != "??" && $6 != "-") lead[++nl] = $1 }
+    function mark(p, s) { st[p] = s; order[++no] = p }
     END {
       # each terminal holds itself and every process above it; a walk ends
       # where an earlier one already went, since all above that is marked
@@ -1501,13 +1510,27 @@ kill_set() {  # [-t] <uid> <root pid...>
         p = q[i]
         if (p in seen) continue
         seen[p] = 1
-        if (index(prot, " " p " ")) { print "P", p; continue }
+        if (index(prot, " " p " ")) { mark(p, "P"); continue }
         if (!(p in owner)) continue                    # gone since the read
-        if (owner[p] != me) { print "O", p; continue }
-        if ((p in holds) || (fence && index(named, " " p " "))) { print "T", p; continue }
-        print "K", p
+        if (owner[p] != me) { mark(p, "O"); continue }
+        if (index(cont, " " p " ")) { mark(p, "C"); continue }
+        if ((p in holds) || (fence && index(named, " " p " "))) { mark(p, "T"); continue }
+        mark(p, "K")
         m = split(kids[p], c, " ")
         for (j = 1; j <= m; j++) q[++n] = c[j]
+      }
+      # everything beneath a process kept for another user is kept with it
+      for (p in st) if (st[p] == "O") {
+        top = 0; stk[++top] = p
+        while (top) {
+          x = stk[top--]; m = split(kids[x], c, " ")
+          for (j = 1; j <= m; j++) if (!(c[j] in under)) { under[c[j]] = 1; stk[++top] = c[j] }
+        }
+      }
+      for (i = 1; i <= no; i++) {
+        p = order[i]; s = st[p]
+        if (s == "K" && (p in under)) s = "U"
+        print s, p
       }
     }'
 }
@@ -1535,6 +1558,15 @@ pid_names() {
     { a = ""; for (i = 2; i <= NF; i++) a = a (i > 2 ? " " : "") $i
       printf "%s%s (%s)", (NR > 1 ? ", " : ""), shorten(a, 28), $1 }
     END { if (more > 0) printf " and %d more", more }'
+}
+
+# the distinct containers some pids run in, by name - or a plain word when
+# docker ps cannot name them (Docker off, or the daemon down)
+container_names_of() {
+  local names
+  names=$(printf '%s\n' "$@" | container_tagmap | tr '|' '\n' |
+    awk -F= 'NF == 2 && !seen[$2]++ { printf "%s%s", (n++ ? ", " : ""), $2 }')
+  printf '%s' "${names:-unnamed}"
 }
 
 # "a", "a or b", "a, b or c"
@@ -1572,7 +1604,7 @@ pids_table() {
 # ------------------------------------------------------------------- kill ----
 kill_cmd() {
   local kind="" target="" assume_yes=0 sig=TERM dry=0 a r p k stop_cids=""
-  local -a roots=() pids=() skipped=() others=() terminals=() climbed=() plan=() fence=()
+  local -a roots=() pids=() skipped=() others=() beneath=() incont=() terminals=() climbed=() plan=() fence=()
 
   for a in "$@"; do
     case "$a" in
@@ -1637,6 +1669,16 @@ kill_cmd() {
       pid_alive "$target" || die "no such process: $target"
       [ "$target" -le 1 ] && die "refusing to kill pid $target (init) - that would take down WSL"
       is_protected "$target" && die "pid $target is your own shell or session - refusing"
+      # ps -e lists processes, not threads, while /proc answers for a thread
+      # id too - and on Linux, signalling one reaches its whole process
+      if [ -z "${PI_UID[$target]:-}" ]; then
+        local tgid=""
+        [ -r "/proc/$target/status" ] && tgid=$(awk '$1 == "Tgid:" { print $2 }' "/proc/$target/status")
+        if [ -n "$tgid" ] && [ "$tgid" != "$target" ]; then
+          die "pid $target is a thread of process $tgid, not a process - name the process: $PROG kill pid $tgid"
+        fi
+        die "pid $target is not in the process table - it may have just exited"
+      fi
       [ "${PI_UID[$target]:-}" = "$EUID" ] ||
         die "pid $target belongs to ${PI_USER[$target]:-another user} - not yours to stop"
       roots=("$target")
@@ -1678,7 +1720,11 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
   case "$kind" in
     group|project)
       fence=(-t)
-      FENCE_PIDS=" $(snap | awk -F'\t' '$6 == "terminal" { printf "%s ", $1 }') " ;;
+      FENCE_PIDS=" $(snap | awk -F'\t' '$6 == "terminal" { printf "%s ", $1 }') "
+      # a project routes its containers to Docker already; a group has to be
+      # told which of its members are inside one
+      docker_ready
+      CONT_PIDS=" $(container_pids | cut -f1 | tr '\n' ' ') " ;;
   esac
   if [ "${#roots[@]}" -gt 0 ]; then
     while read -r k p; do
@@ -1686,6 +1732,8 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
         K) pid_alive "$p" && pids+=("$p") ;;
         P) skipped+=("$p") ;;
         O) others+=("$p") ;;
+        U) beneath+=("$p") ;;
+        C) incont+=("$p") ;;
         T) terminals+=("$p") ;;
       esac
     done < <(kill_set ${fence[@]+"${fence[@]}"} "$EUID" "${roots[@]}" | sort -k2,2n)
@@ -1696,6 +1744,8 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
     local -a why=()
     [ "${#skipped[@]}" -gt 0 ] && why+=("your own session")
     [ "${#others[@]}" -gt 0 ] && why+=("another user's ($(owners_of "${others[@]}"))")
+    [ "${#beneath[@]}" -gt 0 ] && why+=("beneath another user's process")
+    [ "${#incont[@]}" -gt 0 ] && why+=("inside a container ($(container_names_of "${incont[@]}"))")
     [ "${#terminals[@]}" -gt 0 ] && why+=("a terminal or holds one")
     printf '%sNothing to kill' "$C_Y"
     if [ "${#why[@]}" -gt 0 ]; then printf ' - every match is %s' "$(join_or "${why[@]}")"; fi
@@ -1711,6 +1761,14 @@ $(printf '%s\n' "$distinct" | sed 's/^/    /')"
   if [ "${#others[@]}" -gt 0 ]; then
     printf '  %sleaving %d pid(s) owned by %s - not yours to stop, nor anything under them%s\n' \
       "$C_G" "${#others[@]}" "$(owners_of "${others[@]}")" "$C_0"
+  fi
+  if [ "${#beneath[@]}" -gt 0 ]; then
+    printf "  %sleaving %d pid(s) of yours that run beneath another user's process: %s%s\n" \
+      "$C_G" "${#beneath[@]}" "$(pid_names "${beneath[@]}")" "$C_0"
+  fi
+  if [ "${#incont[@]}" -gt 0 ]; then
+    printf '  %sleaving %d pid(s) inside containers (%s) - stop those through Docker: docker stop <name>, or ddev stop <project>%s\n' \
+      "$C_G" "${#incont[@]}" "$(container_names_of "${incont[@]}")" "$C_0"
   fi
   if [ "${#terminals[@]}" -gt 0 ]; then
     printf '  %skeeping %d pid(s) that are or hold a terminal - close those yourself: %s%s\n' \

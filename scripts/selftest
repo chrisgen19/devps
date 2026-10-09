@@ -448,6 +448,14 @@ fi
 # say which container: the throwaway sleep plays a process in ddev-aha-web.
 has "a process inside a container carries its name in the process tables" \
   "$(dk group other | awk -v p="$inner_pid" '$1 == p')" "[ddev-aha-web] sleep 30"
+# and kill group never signals one: a container is stopped through Docker, and
+# DDEV runs its processes as you, so ownership alone would not keep it. The
+# plain sleep beside it, in the same group, still goes.
+kg_out=$(dk kill group other -d) || true
+same "kill group leaves a process inside a container, and still stops its neighbour" \
+  "$(printf '%s\n' "$kg_out" | awk -v c="$inner_pid" -v o="$plain_pid" '
+     $1 == c { s = s "container " } $1 == o { s = s "plain " } END { printf "%s", s }')" "plain "
+has "and names the container, pointing at Docker" "$kg_out" "inside containers (ddev-aha-web) - stop those through Docker"
 same "and with Docker off it does not" \
   "$(DEVPS_DOCKER=0 DEVPS_DOCKER_PS="$dps" DEVPS_CGROUPS="$cgf" "$DEVPS" group other |
      awk -v p="$inner_pid" '$1 == p' | grep -c '\[ddev-aha-web\]')" 0
@@ -1210,6 +1218,27 @@ same "kill_set keeps your session and another user's process, and nothing under 
      sort -k2,2n | tr '\n' ' ')" \
   "K 10 K 11 O 12 K 14 O 20 P 30 "
 
+# A group queues each of its members as a root of its own, so one beneath
+# another user's member used to be reached without passing through it: root's
+# 12 over your 13 and 14, and your 10 over root's 11 over your 15, with 12,
+# 13 and 15 all members. Everything beneath a process kept for another user is
+# kept with it.
+printf '%s\n' \
+  '10 1 1000 10 S ? me' '11 10 0 10 S ? root' '15 11 1000 10 S ? me' \
+  '12 1 0 12 Ss ? root' '13 12 1000 12 S ? me' '14 13 1000 12 S ? me' > "$procs"
+same "a member beneath another user's process is kept, and all beneath it" \
+  "$(DEVPS_PROCS="$procs" devps_run 'PROTECTED=" 1 "; kill_set -t 1000 12 13 10 15' |
+     sort -k2,2n | tr '\n' ' ')" \
+  "K 10 O 11 O 12 U 13 U 14 U 15 "
+
+# A process inside a container is never signalled, nor anything under it:
+# DDEV runs them as you, so ownership does not catch them
+printf '%s\n' '30 1 1000 30 S ? me' '31 1 1000 31 S ? me' '32 31 1000 31 S ? me' > "$procs"
+same "a process inside a container is kept, and nothing under it reached" \
+  "$(DEVPS_PROCS="$procs" devps_run 'PROTECTED=" 1 "; CONT_PIDS=" 31 "; kill_set 1000 30 31' |
+     sort -k2,2n | tr '\n' ' ')" \
+  "K 30 C 31 "
+
 # A group never takes a terminal, by what a process holds, not its name:
 #   40  a terminal host nobody has named, holding shell 41 on pts/3, with an
 #       agent 42 running in it
@@ -1314,6 +1343,33 @@ if [ -z "$theirs" ]; then
 else
   has "another user's pid is refused" "$("$DEVPS" kill pid "$theirs" -d 2>&1 > /dev/null)" \
     "not yours to stop"
+fi
+# A thread id answers in /proc but is no process: ps -e does not list it, and
+# on Linux signalling one reaches its whole process. kill pid refuses it and
+# names the process instead, rather than calling it another user's.
+if [ "$PLAT" != Linux ]; then
+  skip "a thread id is refused, naming its process (Linux only)"
+elif ! command -v python3 > /dev/null; then
+  skip "a thread id is refused, naming its process (no python3)"
+else
+  python3 -c 'import threading, time
+threading.Thread(target=time.sleep, args=(30,), daemon=True).start()
+time.sleep(30)' &
+  threaded=$!
+  sleep 1
+  thread=""
+  for t in "/proc/$threaded/task/"*; do
+    t=${t##*/}
+    if [ "$t" != "$threaded" ]; then thread=$t; break; fi
+  done
+  if [ -z "$thread" ]; then
+    skip "a thread id is refused, naming its process (no second thread seen)"
+  else
+    has "a thread id is refused, naming its process" \
+      "$("$DEVPS" kill pid "$thread" -d 2>&1 > /dev/null)" "is a thread of process $threaded"
+  fi
+  kill "$threaded" 2> /dev/null || true
+  wait "$threaded" 2> /dev/null || true
 fi
 # On WSL, kill group other once listed every terminal, through the root
 # /init above each one. -d, and every row checked against its real owner.

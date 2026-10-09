@@ -479,7 +479,7 @@ Five guards, in order:
 
 1. **pid 1 is refused outright.** `refusing to kill pid 1 (init) - that would take down WSL`
 2. **Your own session is refused.** `pid 175132 is your own shell or session - refusing`
-3. **Another user's processes are refused.** `pid 217 belongs to root - not yours to stop`. A group or a project that takes in someone else's process leaves it, and everything under it, alone. Under `sudo`, yours means root's.
+3. **Another user's processes are refused.** `pid 217 belongs to root - not yours to stop`. A group or a project that takes in someone else's process leaves it, and everything under it, alone - even a process of yours beneath it that matches the group too. Under `sudo`, yours means root's.
 4. **Protected subtrees are never expanded.** `kill group ai-agent` reaps other agents but leaves the session you are typing in, and its children, alone.
 5. **A group or a project never takes a terminal.** `kill group` and `kill project` keep any process that is a terminal's session leader, or has one anywhere beneath it, whatever group it is in: tmux, a terminal emulator's server, the scripts VS Code starts its server from. Stopping any of those hangs up every window it holds, and keeping the shell alone would save nothing. It is decided by what a process holds, not what it is called, so a terminal host nobody has named is kept too; so is anything in the `terminal` group, such as a `tmux attach` client. The preview names what it kept. `kill pid` names its target, so it still reaches one.
 
@@ -570,6 +570,11 @@ WILL STOP CONTAINERS  (through Docker, not a signal)
   every site. `kill port 80` refuses and points at `ddev poweroff`.
 - `kill group container` is refused, like `kill group system` and `kill group terminal`: the runtime as
   a set is every container at once.
+- No `kill group` signals a process inside a container. A containerised
+  `mysqld` is still a `database`, and DDEV runs its processes as you, so
+  ownership alone would not stop `kill group other` reaching into DDEV's
+  router. Those are left, with their containers named and a pointer to
+  `docker stop` or `ddev stop`.
 
 ### How it knows
 
@@ -661,6 +666,7 @@ useful row in the table and goes back to meaning what you would guess.
 - **`-9` skips cleanup.** Next dev servers flush caches on SIGTERM. Try the polite signal first; `devps` only suggests `-9` if something ignored it.
 - **Ports owned by other users show `-` for pid.** `port <n>` and `kill port <n>` say the port is held by another user rather than calling it free. Run `sudo devps ports` to see who. On macOS these come from `netstat`, because `lsof` leaves other users' sockets out entirely.
 - **`idle` costs 300ms.** It takes two snapshots to get a real CPU number, so it is slower than the other one-shot commands by exactly that gap.
+- **`kill pid` takes a process, not a thread.** On Linux `/proc` answers for a thread id as well, and signalling one reaches its whole process, so a thread id is refused with the process it belongs to named instead.
 - **Orphan detection looks for ppid 1.** Under a process supervisor or an agent that makes itself a subreaper, an abandoned process is reparented to that instead of to init, and will not be flagged.
 - **`IO/s` only covers your own processes.** `/proc/<pid>/io` needs ptrace access; other users' processes report `-`. The read is skipped entirely for commands that do not show the column.
 - **`projects` can only see your own processes.** A working directory is readable for processes you own; anything else lands in the `(cwd not readable)` bucket rather than being guessed at.
