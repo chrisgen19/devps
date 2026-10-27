@@ -346,11 +346,15 @@ group "docker: a published port names its container"
     "$(printf '5%.0s' {1..64})" ddev-evil2-web ddev/ddev-webserver 'aha --all' /home/u/wp/evil2 \
       ddev-evil2 /home/u/wp/evil2/.ddev '127.0.0.1:32871->80/tcp'
 } > "$dps"
+# bash under the forwarders' names, not sleep: where sleep is a multicall
+# coreutils (uutils, as on Ubuntu 26.04) it reads its tool from argv[0] and a
+# copy called docker-proxy exits at once. The trailing : keeps bash from
+# exec'ing sleep, so the named process is the one that stays.
 fwd_dir=$(mktemp -d)
-cp "$(command -v sleep)" "$fwd_dir/docker-proxy"
-cp "$(command -v sleep)" "$fwd_dir/rootlesskit"
-"$fwd_dir/docker-proxy" 30 & fwd_pid=$!
-"$fwd_dir/rootlesskit" 30 & rlk_pid=$!
+cp "$BASH" "$fwd_dir/docker-proxy"
+cp "$BASH" "$fwd_dir/rootlesskit"
+"$fwd_dir/docker-proxy" -c 'sleep 30; :' & fwd_pid=$!
+"$fwd_dir/rootlesskit" -c 'sleep 30; :' & rlk_pid=$!
 sleep 30 & plain_pid=$!
 sleep 30 & inner_pid=$!
 printf '%s\n' "/proc/$inner_pid/cgroup:docker-$idw" > "$cgf"
@@ -492,6 +496,8 @@ same "each kind of container gets its own clean stop" \
   "$(printf '%s\n' 'ddev stop aha' 'ddev poweroff  (stops every DDEV project)' \
       'docker compose -p shop stop' 'docker stop scratch')"
 
+pkill -P "$fwd_pid" 2>/dev/null || true
+pkill -P "$rlk_pid" 2>/dev/null || true
 kill "$fwd_pid" "$rlk_pid" "$plain_pid" "$inner_pid" 2>/dev/null || true
 wait "$fwd_pid" "$rlk_pid" "$plain_pid" "$inner_pid" 2>/dev/null || true
 rm -rf "$fwd_dir"; rm -f "$dps" "$cgf" "$lsn"
