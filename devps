@@ -2005,6 +2005,7 @@ DASH_MSG=""
 DASH_HELP=0
 DIRTY=1
 LAST_SEC=0
+SIZE_SEC=0; TTY_SIZE=""
 TROWS=24; TCOLS=80
 FRAME=0
 LAST_US=0
@@ -2641,11 +2642,25 @@ dash_paint() {
 dash_resize() {
   local sz
   sz=$(stty size <&3) || sz="24 80"
+  TTY_SIZE=$sz
   TROWS=${sz%% *}; TCOLS=${sz##* }
   case "$TROWS$TCOLS" in *[!0-9]*) TROWS=24; TCOLS=80 ;; esac
   [ "$TROWS" -lt 10 ] && TROWS=10
   [ "$TCOLS" -lt 40 ] && TCOLS=40
   dash_build
+}
+
+# Polled once a second rather than trapped on WINCH: bash 5.2 can run a trap
+# while it is part-way through parsing a $(...), which leaves the parser broken
+# ("unexpected EOF while looking for matching `)'") or aborts the shell with
+# "longjmp causes uninitialized stack frame". Even a trap that only sets a
+# flag does it, so there is no safe trap to have.
+dash_poll_size() {
+  local sz
+  sz=$(stty size <&3) || return 0
+  [ "$sz" = "$TTY_SIZE" ] && return 0
+  dash_resize
+  DIRTY=1
 }
 
 # the number keys name views directly, so an unavailable one is refused here
@@ -2799,14 +2814,19 @@ dash_cmd() {
 
   trap 'dash_cleanup; exit 0' INT TERM
   trap 'dash_cleanup' EXIT
-  trap 'dash_resize' WINCH
   printf '\033[?1049h\033[?25l'
 
   dash_resize
+  SIZE_SEC=$EPOCHSECONDS
   read_cpu            # prime the delta, so the first frame is not a fake 100%
   dash_sample
   while true; do
     FRAME=$(( FRAME + 1 ))
+    # no WINCH trap - see dash_poll_size
+    if [ "$EPOCHSECONDS" != "$SIZE_SEC" ]; then
+      SIZE_SEC=$EPOCHSECONDS
+      dash_poll_size
+    fi
     now=${EPOCHREALTIME/[.,]/}
     if [ "$DASH_PAUSED" = 0 ] &&
        [ $(( now - SAMPLE_US )) -ge $(( DASH_INT * 1000000 )) ]; then
