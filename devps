@@ -352,8 +352,20 @@ function lspname(s,   n, w, i, j, prog, base, sc) {
   n = split(s, w, /[ \t]+/)
   j = 1; prog = w[1]; base = tolower(prog); sub(/^.*\//, "", base)
   if (base ~ /^(node|nodejs|bun)$/) {
+    # An option that takes its value as the next word hands that word to the
+    # option, not the program: "node -r /tmp/tsserver.js app.js" runs app.js,
+    # and would otherwise land in lsp, where kill group lsp would take it.
+    # With -e, -p or --run there is no script file at all. bun run <file> is
+    # bun with a subcommand in front.
     prog = ""
-    for (i = 2; i <= n; i++) if (w[i] !~ /^-/) { j = i; prog = w[i]; break }
+    for (i = 2; i <= n; i++) {
+      if (w[i] ~ /^(-e|--eval|-p|--print|--run)$/) return ""
+      if (w[i] == "--") { if (i < n) { j = i + 1; prog = w[j] } break }
+      if (w[i] ~ /^(-r|--require|--import|--loader|--experimental-loader|-C|--conditions|--env-file|--env-file-if-exists|--input-type|--title|--disable-warning|--redirect-warnings|--openssl-config|--icu-data-dir|--snapshot-blob|--watch-path)$/) { i++; continue }
+      if (w[i] ~ /^-/) continue
+      if (base == "bun" && w[i] == "run" && prog == "" && i < n) continue
+      j = i; prog = w[i]; break
+    }
   }
   prog = tolower(prog); base = prog; sub(/^.*\//, "", base)
   if (base ~ /^tsserver(\.js)?$/)

@@ -864,6 +864,20 @@ expect_group lsp        '/home/u/.vscode-server/bin/abc/node /home/u/.vscode-ser
 expect_group lsp        'node /usr/lib/node_modules/intelephense/lib/intelephense.js --stdio'
 expect_group lsp        '/home/u/app/node_modules/@biomejs/cli-linux-x64/biome lsp-proxy'
 expect_group lsp        '/home/u/app/node_modules/@biomejs/cli-linux-x64/biome __run_server'
+# an option that takes the next word as its value is not the program: preloads
+# and evals named tsserver must not put an ordinary app where kill group lsp
+# reaches it, and a real server behind a preload is still found
+expect_group node       'node --require /tmp/tsserver.js app.js'
+expect_group node       'node -r /tmp/tsserver.js app.js'
+expect_group node       'node --import /tmp/tsserver.js app.js'
+expect_group node       'node -e tsserver.js'
+expect_group node       'node --eval tsserver.js'
+expect_group node       'node -p tsserver.js'
+expect_group lsp        'node -r ./setup.js /app/node_modules/typescript/lib/tsserver.js'
+expect_group lsp        'node --require ./setup.js /app/node_modules/typescript/lib/tsserver.js'
+expect_group lsp        'node --max-old-space-size=4096 -- /app/node_modules/typescript/lib/tsserver.js'
+expect_group lsp        'bun run /app/node_modules/typescript/lib/tsserver.js'
+expect_group node       'bun run dev'
 # the program decides, never an argument
 expect_group node       '/usr/bin/node app.js --log /tmp/tsserver.js'
 expect_group node       '/usr/bin/node /home/u/app/node_modules/@biomejs/biome/bin/biome check --write .'
