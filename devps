@@ -31,6 +31,7 @@ group_palette() {
     GCOL[dev-server]=$'\033[38;5;45m'  # azure
     GCOL[browser]=$'\033[38;5;75m'     # blue
     GCOL[editor]=$'\033[38;5;141m'     # violet
+    GCOL[lsp]=$'\033[38;5;183m'        # plum - editor tooling, a paler violet
     GCOL[database]=$'\033[38;5;221m'   # gold
     GCOL[webserver]=$'\033[38;5;79m'   # teal
     GCOL[node]=$'\033[38;5;114m'       # green
@@ -45,6 +46,7 @@ group_palette() {
     GCOL[webserver]=$'\033[1;36m' GCOL[node]=$'\033[32m'
     GCOL[container]=$'\033[1;35m' GCOL[terminal]=$'\033[1;34m'
     GCOL[system]=$'\033[37m'  GCOL[other]=$'\033[2m'
+    GCOL[lsp]=$'\033[1;32m'
   fi
   # flattened for awk: group=escape|group=escape|...
   GCOLS_STR=""
@@ -335,9 +337,57 @@ function helper(s,   app, t, u, path, prog) {
   }
   return app " " t
 }
+# The language server a process is, or "". Decided by the program node runs -
+# the first word after node that is not a flag - or the executable itself when
+# there is no node in front, never by an argument: "node app.js --log
+# tsserver.js" is not tsserver. The server mode is an argument, read only once
+# the program has been recognised. Editors and agents (VS Code, the Claude Code
+# typescript-lsp plugin) start these inside a project, so without a name the
+# 1G semantic tsserver reads as a node process of the project itself.
+#
+# Biome is one binary for everything, so for it the subcommand is the program:
+# lsp-proxy is what an editor runs and __run_server the daemon behind it, while
+# "biome check" is a one-off lint and stays where it was.
+function lspname(s,   n, w, i, j, prog, base, sc) {
+  n = split(s, w, /[ \t]+/)
+  j = 1; prog = w[1]; base = tolower(prog); sub(/^.*\//, "", base)
+  if (base ~ /^(node|nodejs|bun)$/) {
+    # An option that takes its value as the next word hands that word to the
+    # option, not the program: "node -r /tmp/tsserver.js app.js" runs app.js,
+    # and would otherwise land in lsp, where kill group lsp would take it.
+    # With -e, -p or --run there is no script file at all. bun run <file> is
+    # bun with a subcommand in front.
+    prog = ""
+    for (i = 2; i <= n; i++) {
+      if (w[i] ~ /^(-e|--eval|-p|--print|--run)$/) return ""
+      if (w[i] == "--") { if (i < n) { j = i + 1; prog = w[j] } break }
+      if (w[i] ~ /^(-r|--require|--import|--loader|--experimental-loader|-C|--conditions|--env-file|--env-file-if-exists|--input-type|--title|--disable-warning|--redirect-warnings|--openssl-config|--icu-data-dir|--snapshot-blob|--watch-path)$/) { i++; continue }
+      if (w[i] ~ /^-/) continue
+      if (base == "bun" && w[i] == "run" && prog == "" && i < n) continue
+      j = i; prog = w[i]; break
+    }
+  }
+  prog = tolower(prog); base = prog; sub(/^.*\//, "", base)
+  if (base ~ /^tsserver(\.js)?$/)
+    return (s ~ /(^| )--serverMode +(partialSemantic|syntactic)( |$)/) ? "tsserver (syntax)" : "tsserver"
+  if (base == "typingsinstaller.js") return "tsserver typings"
+  if (base == "typescript-language-server" || prog ~ /\/typescript-language-server\/lib\/cli\.m?js$/)
+    return "typescript-language-server"
+  if (base ~ /^(eslintserver\.js|vscode-eslint-language-server)$/)            return "eslint server"
+  if (base ~ /^(tailwind(mode)?server\.js|tailwindcss-language-server)$/)    return "tailwind server"
+  if (base ~ /^intelephense(\.js)?$/)                                         return "intelephense"
+  if (base == "biome") {
+    sc = ""
+    for (i = j + 1; i <= n; i++) if (w[i] !~ /^-/) { sc = w[i]; break }
+    if (sc == "lsp-proxy")    return "biome lsp"
+    if (sc == "__run_server") return "biome daemon"
+  }
+  return ""
+}
 function shorten(a, w,   s, h) {
   s = redact(a)
-  h = helper(s)
+  h = lspname(s)
+  if (h == "") h = helper(s)
   if (h != "") {
     s = h
   } else {
@@ -350,7 +400,7 @@ function shorten(a, w,   s, h) {
 }
 '
 
-DP_GROUPS="mcp ai-agent dev-server browser editor database webserver node container terminal system other"
+DP_GROUPS="mcp ai-agent dev-server browser editor lsp database webserver node container terminal system other"
 
 # The group classifier, shared by every snapshot implementation. A process must
 # land in the same group whichever kernel reported it, or the group table means
@@ -421,6 +471,11 @@ function cat(a,   l, exe, base) {
   # Second, for the same reason as the runtime: a multiplexer command line
   # carries session and window names, and every test below reads the line.
   if (isterm(a)) return "terminal"
+  # A language server. Ahead of every name test below, since it runs out of a
+  # project directory that can be called anything - mcp-tools, vite-demo - and
+  # ahead of editor, so the tsserver VS Code starts is counted here too.
+  # lspname() lives in AWKLIB, which every caller loads in front of this.
+  if (lspname(a) != "") return "lsp"
   # the official packages spell it out: "@modelcontextprotocol/server-postgres"
   # contains no "mcp", so it used to fall through to the postgres branch and be
   # counted as a database. Every other spelling in the wild - mcp-server-x,
@@ -1102,7 +1157,7 @@ snapshot() { "snapshot_$DP_PLATFORM"; }
 
 snapshot_linux() {
   ps -eo pid=,ppid=,rss=,etimes=,pcpu=,args= --sort=-rss |
-    awk -v wantio="$DP_IO" "$AWKCAT"'
+    awk -v wantio="$DP_IO" "$AWKLIB$AWKCAT"'
   function swapkb(pid,   f, line, p, v) {
     f = "/proc/" pid "/status"; v = 0
     while ((getline line < f) > 0)
@@ -1155,7 +1210,7 @@ snapshot_linux() {
 # memory instead of swapping per process, and exposes no readable per-process
 # block IO counter. Both are reported absent, not estimated.
 snapshot_darwin() {
-  ps -ww -eo pid=,ppid=,rss=,etime=,pcpu=,time=,args= -m | awk "$AWKCAT$AWKSECS"'
+  ps -ww -eo pid=,ppid=,rss=,etime=,pcpu=,time=,args= -m | awk "$AWKLIB$AWKCAT$AWKSECS"'
   {
     pid = $1; ppid = $2; rss = $3 + 0; et = secs($4); pc = $5 + 0
     tk = secs($6) * 100          # CLK_TCK is 100 on Darwin as it is on Linux

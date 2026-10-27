@@ -255,7 +255,7 @@ What it shows that the one-shot report cannot:
   hits. It answers the question the `io` pressure figure raises
 - **new processes** - a pid that appeared since the last sample is highlighted
 - **a colour per group** - `mcp` red, `ai-agent` orange, `dev-server` azure,
-  `browser` blue, `editor` violet, `database` gold, `webserver` teal, `node`
+  `browser` blue, `editor` violet, `lsp` plum, `database` gold, `webserver` teal, `node`
   green, `container` pink, `terminal` tan, `system` dark grey, `other` grey. The same colour follows a group into every table, in the
   dashboard and in the one-shot report; `devps help` prints the legend
 - **the same five views** you already have as commands, on keys `1`-`5`
@@ -609,6 +609,7 @@ Processes are bucketed by command line, first match wins:
 | `dev-server` | next, vite, nuxt, astro, webpack, remix, turbo |
 | `browser` | chrome, chromium, firefox, playwright, puppeteer |
 | `editor` | vscode-server, cursor-server |
+| `lsp` | Language servers an editor or agent started: `tsserver` (and its `--serverMode partialSemantic` twin, shown as `tsserver (syntax)`), its `typingsInstaller`, `typescript-language-server`, the ESLint and Tailwind CSS servers (VS Code's `eslintServer.js` and `tailwindServer.js`, or the standalone `vscode-eslint-language-server` and `tailwindcss-language-server`), `intelephense`, and Biome's `lsp-proxy` and the `__run_server` daemon behind it (`biome check` is not one). Decided by the program node runs, never an argument, and tested right after `terminal`, so one in a project called `mcp-tools` is still an `lsp` |
 | `database` | postgres, mysqld, mariadb, redis, mongod |
 | `webserver` | apache2, nginx, php-fpm, httpd |
 | `node` | Any other node, npm, pnpm, yarn, bun |
@@ -632,7 +633,15 @@ Google Chrome.app/Contents/Frameworks/Google Chro...   ->  Google Chrome utility
 ```
 
 Only the process types Chromium actually uses count, so `mount --type=ext4` is
-left alone. Every rule above is matched against the
+left alone.
+
+Language servers get the same treatment. A tsserver runs out of the project's
+own `node_modules`, so its full path cut to a column width read
+`node ~/projects/app/node_modules/ty...`, which looks like the project's dev
+server. It shows as `tsserver`, `tsserver (syntax)`, `tsserver typings` or
+`typescript-language-server` instead, with the project tag in front, and the
+others as `eslint server`, `tailwind server`, `intelephense`, `biome lsp` and
+`biome daemon`. Every rule above is matched against the
 **executable** only, never the arguments - `/opt/tool --name com.apple.fake` is
 not a system process, and `/home/alice/cron` is not cron.
 

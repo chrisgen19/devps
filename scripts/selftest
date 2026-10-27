@@ -792,11 +792,44 @@ expect_short 'chrome_crashpad_handler crashpad' \
 expect_short 'chrome renderer' \
   '/opt/google/chrome/chrome --type=renderer --user-data-dir=/tmp/Other.app/profile'
 
+group "language servers are named, not truncated"
+# the whole path used to fit in the column only as far as node_modules/ty...
+expect_short 'tsserver' \
+  '/usr/bin/node /home/u/projects/app/node_modules/typescript/lib/tsserver.js --useInferredProjectPerProjectRoot --useNodeIpc'
+expect_short 'tsserver (syntax)' \
+  '/usr/bin/node /home/u/projects/app/node_modules/typescript/lib/tsserver.js --serverMode partialSemantic --useNodeIpc'
+expect_short 'tsserver typings' \
+  '/usr/bin/node /home/u/app/node_modules/.pnpm/typescript@5.9.3/node_modules/typescript/lib/typingsInstaller.js --globalTypingsCacheLocation /home/u/.cache'
+expect_short 'typescript-language-server' 'node /home/u/.local/bin/typescript-language-server --stdio'
+expect_short 'typescript-language-server' \
+  '/usr/bin/node /usr/lib/node_modules/typescript-language-server/lib/cli.mjs --stdio'
+expect_short 'eslint server' \
+  '/home/u/.vscode-server/bin/abc/node /home/u/.vscode-server/extensions/dbaeumer.vscode-eslint-3.0.34/server/out/eslintServer.js --node-ipc --clientProcessId=123'
+expect_short 'eslint server' 'node /home/u/.local/bin/vscode-eslint-language-server --stdio'
+expect_short 'tailwind server' \
+  '/home/u/.vscode-server/bin/abc/node /home/u/.vscode-server/extensions/bradlc.vscode-tailwindcss-0.16.0/dist/tailwindServer.js --node-ipc --clientProcessId=123'
+expect_short 'tailwind server' \
+  '/home/u/.vscode-server/bin/abc/node /home/u/.vscode-server/extensions/bradlc.vscode-tailwindcss-0.16.0/dist/tailwindModeServer.js --node-ipc'
+expect_short 'tailwind server' 'node /home/u/.local/bin/tailwindcss-language-server --stdio'
+expect_short 'intelephense' \
+  '/home/u/.vscode-server/bin/abc/node /home/u/.vscode-server/extensions/bmewburn.vscode-intelephense-client-1.14.4/node_modules/intelephense/lib/intelephense.js --node-ipc'
+expect_short 'intelephense' 'node /usr/lib/node_modules/intelephense/lib/intelephense.js --stdio'
+expect_short 'biome lsp' \
+  '/home/u/app/node_modules/.pnpm/@biomejs+cli-linux-x64@2.4.2/node_modules/@biomejs/cli-linux-x64/biome lsp-proxy'
+expect_short 'biome lsp' 'node /home/u/app/node_modules/@biomejs/biome/bin/biome lsp-proxy --config-path=/home/u/app'
+expect_short 'biome daemon' \
+  '/home/u/app/node_modules/@biomejs/cli-linux-x64/biome __run_server --log-path=/home/u/.cache/biome'
+# an argument naming tsserver is not tsserver
+expect_short 'node app.js --log /tmp/tsserver.js' '/usr/bin/node app.js --log /tmp/tsserver.js'
+# and biome is a language server only when that is the subcommand
+expect_short 'node ~/app/node_modules/.bin/biome check --write .' \
+  '/usr/bin/node /home/u/app/node_modules/.bin/biome check --write .'
+
 group "group classification"
 # drive the real classifier out of the script rather than a copy of it, so this
 # cannot pass against a definition that has drifted
 eval "$(sed -n "/^AWKCAT='/,/^'$/p" "$DEVPS")"
-classify() { printf '%s\n' "$1" | awk "$AWKCAT"'{ print cat($0) }'; }
+classify() { printf '%s\n' "$1" | awk "$AWKLIB$AWKCAT"'{ print cat($0) }'; }
 expect_group() {
   local want="$1" cmd="$2" got
   got=$(classify "$cmd")
@@ -817,6 +850,40 @@ expect_group dev-server 'next-server (v15.5.12)'
 expect_group webserver  'nginx: worker process'
 expect_group browser    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 expect_group ai-agent   'claude'
+# language servers run out of a project's node_modules, and used to read as
+# that project's node process; one living under a directory called mcp-tools
+# or vite-demo must not be taken by those name tests either
+expect_group lsp        '/usr/bin/node /home/u/projects/app/node_modules/typescript/lib/tsserver.js --useInferredProjectPerProjectRoot --useNodeIpc'
+expect_group lsp        'node /home/u/.local/bin/typescript-language-server --stdio'
+expect_group lsp        '/usr/bin/node /home/u/app/node_modules/.pnpm/typescript@5.9.3/node_modules/typescript/lib/typingsInstaller.js --globalTypingsCacheLocation /home/u/.cache/typescript/5.9'
+expect_group lsp        '/usr/bin/node /home/u/mcp-tools/node_modules/typescript/lib/tsserver.js --useNodeIpc'
+expect_group lsp        '/home/u/.vscode-server/bin/abc/node --max-old-space-size=3072 /home/u/.vscode-server/bin/abc/extensions/node_modules/typescript/lib/tsserver.js'
+# VS Code's servers run under .vscode-server, which editor used to take
+expect_group lsp        '/home/u/.vscode-server/bin/abc/node /home/u/.vscode-server/extensions/dbaeumer.vscode-eslint-3.0.34/server/out/eslintServer.js --node-ipc'
+expect_group lsp        '/home/u/.vscode-server/bin/abc/node /home/u/.vscode-server/extensions/bradlc.vscode-tailwindcss-0.16.0/dist/tailwindServer.js --node-ipc'
+expect_group lsp        'node /usr/lib/node_modules/intelephense/lib/intelephense.js --stdio'
+expect_group lsp        '/home/u/app/node_modules/@biomejs/cli-linux-x64/biome lsp-proxy'
+expect_group lsp        '/home/u/app/node_modules/@biomejs/cli-linux-x64/biome __run_server'
+# an option that takes the next word as its value is not the program: preloads
+# and evals named tsserver must not put an ordinary app where kill group lsp
+# reaches it, and a real server behind a preload is still found
+expect_group node       'node --require /tmp/tsserver.js app.js'
+expect_group node       'node -r /tmp/tsserver.js app.js'
+expect_group node       'node --import /tmp/tsserver.js app.js'
+expect_group node       'node -e tsserver.js'
+expect_group node       'node --eval tsserver.js'
+expect_group node       'node -p tsserver.js'
+expect_group lsp        'node -r ./setup.js /app/node_modules/typescript/lib/tsserver.js'
+expect_group lsp        'node --require ./setup.js /app/node_modules/typescript/lib/tsserver.js'
+expect_group lsp        'node --max-old-space-size=4096 -- /app/node_modules/typescript/lib/tsserver.js'
+expect_group lsp        'bun run /app/node_modules/typescript/lib/tsserver.js'
+expect_group node       'bun run dev'
+# the program decides, never an argument
+expect_group node       '/usr/bin/node app.js --log /tmp/tsserver.js'
+expect_group node       '/usr/bin/node /home/u/app/node_modules/@biomejs/biome/bin/biome check --write .'
+expect_group other      '/home/u/app/node_modules/@biomejs/cli-linux-x64/biome format --stdin-file-path=lsp-proxy'
+expect_group other      '/home/u/bin/deploy --notify eslintServer.js'
+expect_group dev-server 'node /home/u/app/node_modules/.bin/vite --tsserver'
 # the OS's own processes, which you did not start and cannot usefully stop
 expect_group system     '/usr/libexec/secinitd'
 expect_group system     '/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter'
