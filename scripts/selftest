@@ -956,6 +956,78 @@ fi
 ok "ascii mode renders"   env DEVPS_ASCII=1 "$DEVPS" top 3
 ok "report with a fake dumb terminal" env TERM=dumb "$DEVPS" top 3
 
+group "the dashboard survives terminal resizes"
+# The v2.6.1 crash: a WINCH trap could run while bash 5.2 was part-way through
+# parsing a $(...), which broke the parser (exit 1) or aborted the shell
+# ("longjmp causes uninitialized stack frame", SIGABRT). With the trap in
+# place this burst killed dash within a second, so a few seconds of it is a
+# real test. The resizes are seeded, so a failure replays the same sizes.
+# The repaint check reads the footer: "+ - rate" is only in it at 100 columns
+# or more, so it shows up after 80 -> 160 only if the resize was noticed.
+if ! command -v python3 > /dev/null; then
+  skip "dash survives a burst of terminal resizes (no python3)"
+else
+  resize_out=$(python3 -c 'import fcntl, os, pty, random, select, signal, struct, sys, termios, time
+dev, burst = sys.argv[1], float(sys.argv[2])
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(dev, [dev, "dash", "1"])
+def size(rows, cols):
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    os.kill(pid, signal.SIGWINCH)
+def pump(secs, until=None):
+    out, end = b"", time.time() + secs
+    while time.time() < end and not (until and until in out):
+        if select.select([fd], [], [], 0.01)[0]:
+            try:
+                out += os.read(fd, 65536)
+            except OSError:
+                break
+    return out
+status = ""
+def gone():
+    global status
+    if not status:
+        r, st = os.waitpid(pid, os.WNOHANG)
+        if r:
+            status = "signal %d" % os.WTERMSIG(st) if os.WIFSIGNALED(st) else "exit %d" % os.WEXITSTATUS(st)
+    return status
+def finish(*lines):
+    print("\n".join(lines))
+    if not gone():
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+    sys.exit()
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+if b"\x1b[?1049h" not in pump(10, b"\x1b[?1049h"):
+    finish("no first frame")
+pump(1)
+random.seed(29)
+end = time.time() + burst
+while time.time() < end:
+    size(random.randint(20, 60), random.randint(80, 200))
+    pump(random.uniform(0.001, 0.05))
+    how = gone()
+    if how:
+        finish("died: " + how, "-", "-")
+size(24, 80)
+pump(1.5)
+narrow = b"+ - rate" not in pump(1.2)
+size(40, 160)
+wide = b"+ - rate" in pump(4, b"+ - rate")
+os.write(fd, b"q")
+for _ in range(50):
+    how = gone()
+    if how:
+        break
+    pump(0.1)
+finish("survived", "repainted" if narrow and wide else "narrow=%s wide=%s" % (narrow, wide),
+       how or "still running after q")' "$DEVPS" 4) || true
+  same "dash survives a burst of terminal resizes" "$(sed -n 1p <<< "$resize_out")" "survived"
+  same "and repaints at the new size" "$(sed -n 2p <<< "$resize_out")" "repainted"
+  same "and still quits cleanly on q" "$(sed -n 3p <<< "$resize_out")" "exit 0"
+fi
+
 group "the old name still works"
 # the rename kept wslps as an alias; PROG is whatever the user typed, so the
 # alias has to describe itself rather than the new name
