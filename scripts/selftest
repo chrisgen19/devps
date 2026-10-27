@@ -803,8 +803,27 @@ expect_short 'tsserver typings' \
 expect_short 'typescript-language-server' 'node /home/u/.local/bin/typescript-language-server --stdio'
 expect_short 'typescript-language-server' \
   '/usr/bin/node /usr/lib/node_modules/typescript-language-server/lib/cli.mjs --stdio'
+expect_short 'eslint server' \
+  '/home/u/.vscode-server/bin/abc/node /home/u/.vscode-server/extensions/dbaeumer.vscode-eslint-3.0.34/server/out/eslintServer.js --node-ipc --clientProcessId=123'
+expect_short 'eslint server' 'node /home/u/.local/bin/vscode-eslint-language-server --stdio'
+expect_short 'tailwind server' \
+  '/home/u/.vscode-server/bin/abc/node /home/u/.vscode-server/extensions/bradlc.vscode-tailwindcss-0.16.0/dist/tailwindServer.js --node-ipc --clientProcessId=123'
+expect_short 'tailwind server' \
+  '/home/u/.vscode-server/bin/abc/node /home/u/.vscode-server/extensions/bradlc.vscode-tailwindcss-0.16.0/dist/tailwindModeServer.js --node-ipc'
+expect_short 'tailwind server' 'node /home/u/.local/bin/tailwindcss-language-server --stdio'
+expect_short 'intelephense' \
+  '/home/u/.vscode-server/bin/abc/node /home/u/.vscode-server/extensions/bmewburn.vscode-intelephense-client-1.14.4/node_modules/intelephense/lib/intelephense.js --node-ipc'
+expect_short 'intelephense' 'node /usr/lib/node_modules/intelephense/lib/intelephense.js --stdio'
+expect_short 'biome lsp' \
+  '/home/u/app/node_modules/.pnpm/@biomejs+cli-linux-x64@2.4.2/node_modules/@biomejs/cli-linux-x64/biome lsp-proxy'
+expect_short 'biome lsp' 'node /home/u/app/node_modules/@biomejs/biome/bin/biome lsp-proxy --config-path=/home/u/app'
+expect_short 'biome daemon' \
+  '/home/u/app/node_modules/@biomejs/cli-linux-x64/biome __run_server --log-path=/home/u/.cache/biome'
 # an argument naming tsserver is not tsserver
 expect_short 'node app.js --log /tmp/tsserver.js' '/usr/bin/node app.js --log /tmp/tsserver.js'
+# and biome is a language server only when that is the subcommand
+expect_short 'node ~/app/node_modules/.bin/biome check --write .' \
+  '/usr/bin/node /home/u/app/node_modules/.bin/biome check --write .'
 
 group "group classification"
 # drive the real classifier out of the script rather than a copy of it, so this
@@ -839,8 +858,17 @@ expect_group lsp        'node /home/u/.local/bin/typescript-language-server --st
 expect_group lsp        '/usr/bin/node /home/u/app/node_modules/.pnpm/typescript@5.9.3/node_modules/typescript/lib/typingsInstaller.js --globalTypingsCacheLocation /home/u/.cache/typescript/5.9'
 expect_group lsp        '/usr/bin/node /home/u/mcp-tools/node_modules/typescript/lib/tsserver.js --useNodeIpc'
 expect_group lsp        '/home/u/.vscode-server/bin/abc/node --max-old-space-size=3072 /home/u/.vscode-server/bin/abc/extensions/node_modules/typescript/lib/tsserver.js'
+# VS Code's servers run under .vscode-server, which editor used to take
+expect_group lsp        '/home/u/.vscode-server/bin/abc/node /home/u/.vscode-server/extensions/dbaeumer.vscode-eslint-3.0.34/server/out/eslintServer.js --node-ipc'
+expect_group lsp        '/home/u/.vscode-server/bin/abc/node /home/u/.vscode-server/extensions/bradlc.vscode-tailwindcss-0.16.0/dist/tailwindServer.js --node-ipc'
+expect_group lsp        'node /usr/lib/node_modules/intelephense/lib/intelephense.js --stdio'
+expect_group lsp        '/home/u/app/node_modules/@biomejs/cli-linux-x64/biome lsp-proxy'
+expect_group lsp        '/home/u/app/node_modules/@biomejs/cli-linux-x64/biome __run_server'
 # the program decides, never an argument
 expect_group node       '/usr/bin/node app.js --log /tmp/tsserver.js'
+expect_group node       '/usr/bin/node /home/u/app/node_modules/@biomejs/biome/bin/biome check --write .'
+expect_group other      '/home/u/app/node_modules/@biomejs/cli-linux-x64/biome format --stdin-file-path=lsp-proxy'
+expect_group other      '/home/u/bin/deploy --notify eslintServer.js'
 expect_group dev-server 'node /home/u/app/node_modules/.bin/vite --tsserver'
 # the OS's own processes, which you did not start and cannot usefully stop
 expect_group system     '/usr/libexec/secinitd'

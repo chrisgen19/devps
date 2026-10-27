@@ -609,7 +609,7 @@ Processes are bucketed by command line, first match wins:
 | `dev-server` | next, vite, nuxt, astro, webpack, remix, turbo |
 | `browser` | chrome, chromium, firefox, playwright, puppeteer |
 | `editor` | vscode-server, cursor-server |
-| `lsp` | Language servers an editor or agent started: `tsserver` (and its `--serverMode partialSemantic` twin, shown as `tsserver (syntax)`), its `typingsInstaller`, and `typescript-language-server`. Decided by the program node runs, never an argument, and tested right after `terminal`, so one in a project called `mcp-tools` is still an `lsp` |
+| `lsp` | Language servers an editor or agent started: `tsserver` (and its `--serverMode partialSemantic` twin, shown as `tsserver (syntax)`), its `typingsInstaller`, `typescript-language-server`, the ESLint and Tailwind CSS servers (VS Code's `eslintServer.js` and `tailwindServer.js`, or the standalone `vscode-eslint-language-server` and `tailwindcss-language-server`), `intelephense`, and Biome's `lsp-proxy` and the `__run_server` daemon behind it (`biome check` is not one). Decided by the program node runs, never an argument, and tested right after `terminal`, so one in a project called `mcp-tools` is still an `lsp` |
 | `database` | postgres, mysqld, mariadb, redis, mongod |
 | `webserver` | apache2, nginx, php-fpm, httpd |
 | `node` | Any other node, npm, pnpm, yarn, bun |
@@ -639,7 +639,9 @@ Language servers get the same treatment. A tsserver runs out of the project's
 own `node_modules`, so its full path cut to a column width read
 `node ~/projects/app/node_modules/ty...`, which looks like the project's dev
 server. It shows as `tsserver`, `tsserver (syntax)`, `tsserver typings` or
-`typescript-language-server` instead, with the project tag in front. Every rule above is matched against the
+`typescript-language-server` instead, with the project tag in front, and the
+others as `eslint server`, `tailwind server`, `intelephense`, `biome lsp` and
+`biome daemon`. Every rule above is matched against the
 **executable** only, never the arguments - `/opt/tool --name com.apple.fake` is
 not a system process, and `/home/alice/cron` is not cron.
 

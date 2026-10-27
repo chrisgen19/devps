@@ -344,12 +344,16 @@ function helper(s,   app, t, u, path, prog) {
 # the program has been recognised. Editors and agents (VS Code, the Claude Code
 # typescript-lsp plugin) start these inside a project, so without a name the
 # 1G semantic tsserver reads as a node process of the project itself.
-function lspname(s,   n, w, i, prog, base) {
+#
+# Biome is one binary for everything, so for it the subcommand is the program:
+# lsp-proxy is what an editor runs and __run_server the daemon behind it, while
+# "biome check" is a one-off lint and stays where it was.
+function lspname(s,   n, w, i, j, prog, base, sc) {
   n = split(s, w, /[ \t]+/)
-  prog = w[1]; base = tolower(prog); sub(/^.*\//, "", base)
+  j = 1; prog = w[1]; base = tolower(prog); sub(/^.*\//, "", base)
   if (base ~ /^(node|nodejs|bun)$/) {
     prog = ""
-    for (i = 2; i <= n; i++) if (w[i] !~ /^-/) { prog = w[i]; break }
+    for (i = 2; i <= n; i++) if (w[i] !~ /^-/) { j = i; prog = w[i]; break }
   }
   prog = tolower(prog); base = prog; sub(/^.*\//, "", base)
   if (base ~ /^tsserver(\.js)?$/)
@@ -357,6 +361,15 @@ function lspname(s,   n, w, i, prog, base) {
   if (base == "typingsinstaller.js") return "tsserver typings"
   if (base == "typescript-language-server" || prog ~ /\/typescript-language-server\/lib\/cli\.m?js$/)
     return "typescript-language-server"
+  if (base ~ /^(eslintserver\.js|vscode-eslint-language-server)$/)            return "eslint server"
+  if (base ~ /^(tailwind(mode)?server\.js|tailwindcss-language-server)$/)    return "tailwind server"
+  if (base ~ /^intelephense(\.js)?$/)                                         return "intelephense"
+  if (base == "biome") {
+    sc = ""
+    for (i = j + 1; i <= n; i++) if (w[i] !~ /^-/) { sc = w[i]; break }
+    if (sc == "lsp-proxy")    return "biome lsp"
+    if (sc == "__run_server") return "biome daemon"
+  }
   return ""
 }
 function shorten(a, w,   s, h) {
