@@ -2639,9 +2639,10 @@ dash_paint() {
 }
 
 # ---- input ----------------------------------------------------------------
+# [size] - "rows cols" as stty prints it, when the caller has just read it
 dash_resize() {
-  local sz
-  sz=$(stty size <&3) || sz="24 80"
+  local sz=${1:-}
+  [ -n "$sz" ] || sz=$(stty size <&3) || sz="24 80"
   TTY_SIZE=$sz
   TROWS=${sz%% *}; TCOLS=${sz##* }
   case "$TROWS$TCOLS" in *[!0-9]*) TROWS=24; TCOLS=80 ;; esac
@@ -2659,7 +2660,7 @@ dash_poll_size() {
   local sz
   sz=$(stty size <&3) || return 0
   [ "$sz" = "$TTY_SIZE" ] && return 0
-  dash_resize
+  dash_resize "$sz"
   DIRTY=1
 }
 
