@@ -488,7 +488,9 @@ dash_row=$(
     4242 1677721 0 17820 0.0 dev-server 'next-server (v15.5.12)' 0 1 0 0.0 0 0 | dash_fmt_proc)
 same "a long container name keeps a dashboard row inside 80 columns" \
   "$([ "${#dash_row}" -le 78 ] && echo fits || echo "${#dash_row} columns")" fits
-has "and the tag is cut to fit, not dropped" "$dash_row" "[ddev-acc...] next-"
+has "and the tag is cut to fit, not dropped" "$dash_row" "[dde...] next-"
+has "and the row carries what the process costs in RAM and swap together" \
+  "$dash_row" "1.6G       -     1.6G"
 
 same "each kind of container gets its own clean stop" \
   "$(docker_stop_hint ddev aha x; echo; docker_stop_hint ddev-shared - x; echo
