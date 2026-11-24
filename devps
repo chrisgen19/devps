@@ -2315,10 +2315,15 @@ dash_fmt_proc() {
     for (i = 0; i < w; i++) s = s (i < f ? blk[8] : EMPTY)
     return s
   }
+  # RAM+SWP is what a process really costs: a dev server left idle can show a
+  # small RAM figure while gigabytes of it sit in swap. Its 9 columns come
+  # mostly out of the spare margin, and 5 out of the command, so a row still
+  # keeps a few columns spare for a 4-digit CPU% on a many-core box.
   BEGIN { split(BLKS, blk, ",")
           wide = (W >= 108)
-          cmdw = W - (wide ? 82 : 54); if (cmdw < 12) cmdw = 12 }
+          cmdw = W - (wide ? 87 : 59); if (cmdw < 12) cmdw = 12 }
   { rows[NR] = $0
+    if ($2 + $3 > mxt) mxt = $2 + $3
     if ($2 + 0 > mx) mx = $2 + 0
     if ($11 + 0 > mxc) mxc = $11 + 0
     if ($13 + 0 > mxio) mxio = $13 + 0 }
@@ -2331,6 +2336,8 @@ dash_fmt_proc() {
       pc  = (f[12] == 1) ? CN : CD
       sw  = (f[3] + 0 > 0) ? hum(f[3]) : "-"
       swc = (f[3] + 0 > 0) ? CY : CD
+      tot = f[2] + f[3]
+      tc  = (tot > mxt * 0.5) ? CR : (tot > mxt * 0.2) ? CY : CG
       io  = f[13] + 0
       ioc = (io > 1048576) ? CR : (io > 0) ? CY : CD
       # the idle view answers "why is this here", every other view "what is it"
@@ -2342,14 +2349,14 @@ dash_fmt_proc() {
       ct   = ctag(f[1], cmdw - 12)
       cmd  = (ct == "" ? "" : CC ct C0) shorten(f[7], cmdw - length(ct))
       if (wide)
-        printf "%s%7s%s %s%8s%s %s%s%s %s%7s%s %s%5.1f%%%s %s%8s%s %s%8s%s %s%-10s%s %s\n",
+        printf "%s%7s%s %s%8s%s %s%s%s %s%7s%s %s%8s%s %s%5.1f%%%s %s%8s%s %s%8s%s %s%-10s%s %s\n",
           pc, f[1], C0, rc, hum(f[2]), C0, rc, micro(f[2], mx, 8), C0,
-          swc, sw, C0, cc, cpu, C0,
+          swc, sw, C0, tc, hum(tot), C0, cc, cpu, C0,
           ioc, (io > 0 ? hum(io / 1024) "/s" : "-"), C0,
           CD, dur(f[4]), C0, tagc, tag, C0, cmd
       else
-        printf "%s%7s%s %s%8s%s %s%7s%s %s%5.1f%%%s %s%8s%s %s\n",
-          pc, f[1], C0, rc, hum(f[2]), C0, swc, sw, C0,
+        printf "%s%7s%s %s%8s%s %s%7s%s %s%8s%s %s%5.1f%%%s %s%8s%s %s\n",
+          pc, f[1], C0, rc, hum(f[2]), C0, swc, sw, C0, tc, hum(tot), C0,
           cc, cpu, C0, CD, dur(f[4]), C0, cmd
     }
   }'
@@ -2358,9 +2365,9 @@ dash_fmt_proc() {
 dash_hdr_proc() {
   local last=${1:-GROUP}
   if [ "$TCOLS" -ge 108 ]; then
-    printf '%7s %8s %8s %7s %6s %8s %8s %-10s %s' PID RAM "" SWAP "CPU%" "IO/s" UPTIME "$last" COMMAND
+    printf '%7s %8s %8s %7s %8s %6s %8s %8s %-10s %s' PID RAM "" SWAP "RAM+SWP" "CPU%" "IO/s" UPTIME "$last" COMMAND
   else
-    printf '%7s %8s %7s %6s %8s %s' PID RAM SWAP "CPU%" UPTIME COMMAND
+    printf '%7s %8s %7s %8s %6s %8s %s' PID RAM SWAP "RAM+SWP" "CPU%" UPTIME COMMAND
   fi
 }
 

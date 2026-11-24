@@ -222,14 +222,14 @@ Flags: `-y` skip confirmation, `-9` SIGKILL instead of SIGTERM (`docker kill` fo
   ... 2 more, press 5
 
  TOP BY RSS
-      PID      RAM             SWAP   CPU%         UPTIME GROUP      COMMAND
-❯   76147     1.7G ████████       -   0.0% ░░░░░      46m dev-server next-server (v15.5.12)
-    69791     512M ██░░░░░░       -   4.0% ███░░      54m ai-agent   claude
-      783     407M ██░░░░░░   71.0M   5.5% █████    6h33m ai-agent   claude
-    22975     300M █░░░░░░░   91.5M   0.5% ░░░░░    4h25m ai-agent   claude
-   119207     259M █░░░░░░░       -   6.0% █████       1m browser    node ~/projects/budget-...
-    64879     255M █░░░░░░░       -   0.0% ░░░░░    1h12m ai-agent   codex
-   119255     187M █░░░░░░░       -   0.5% ░░░░░       1m browser    chrome-headless-shell -...
+      PID      RAM             SWAP  RAM+SWP   CPU%         UPTIME GROUP      COMMAND
+❯   76147     1.7G ████████       -     1.7G   0.0% ░░░░░      46m dev-server next-server (v15.5.12)
+    69791     512M ██░░░░░░       -     512M   4.0% ███░░      54m ai-agent   claude
+      783     407M ██░░░░░░   71.0M     478M   5.5% █████    6h33m ai-agent   claude
+    22975     300M █░░░░░░░   91.5M     391M   0.5% ░░░░░    4h25m ai-agent   claude
+   119207     259M █░░░░░░░       -     259M   6.0% █████       1m browser    node ~/projects/budget-...
+    64879     255M █░░░░░░░       -     255M   0.0% ░░░░░    1h12m ai-agent   codex
+   119255     187M █░░░░░░░       -     187M   0.5% ░░░░░       1m browser    chrome-headless-shell -...
   ... 8 more
 
  up/dn move  x kill  t tree  s sort:rss  / filter  1-5 views  + - rate  p pause  ? help  q quit
